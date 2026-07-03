@@ -191,6 +191,21 @@ function createVideoWindow(url) {
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
   );
   videoWindow.loadURL(url);
+
+  // 阻止自定义协议跳转（bitbrowser:// / snssdk:// 等）→ Windows 弹"无可用应用"对话框
+  videoWindow.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('devtools://')) {
+      event.preventDefault();
+      log('INFO', '[videoWin] 阻止协议跳转: ' + url);
+    }
+  });
+  videoWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      return { action: 'deny' };
+    }
+    return { action: 'allow' };
+  });
+
   // 页面加载完成后清除覆盖层（防止延迟弹窗）
   videoWindow.webContents.on('did-finish-load', () => {
     dismissOverlays();
