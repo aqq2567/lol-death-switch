@@ -191,7 +191,12 @@ function createVideoWindow(url) {
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
   );
   videoWindow.loadURL(url);
+  // 页面加载完成后清除覆盖层（防止延迟弹窗）
+  videoWindow.webContents.on('did-finish-load', () => {
+    dismissOverlays();
+  });
   videoWindow.once('ready-to-show', () => {
+    videoWindow.maximize();
     showVideoWindow();
   });
   videoWindow.on('closed', () => { videoWindow = null; });
@@ -208,10 +213,31 @@ async function pauseVideo() {
   } catch {}
 }
 
-/** 恢复播放视频窗口中所有视频（幂等） */
+/** 解除视频播放器覆盖层（XG-START、"点击播放"等） */
+async function dismissOverlays() {
+  if (!videoWindow || videoWindow.isDestroyed()) return;
+  try {
+    await videoWindow.webContents.executeJavaScript(
+      '(function(){' +
+      // 西瓜播放器: 点击 "播放" 覆盖层
+      'var xgStart=document.querySelector("xg-start");if(xgStart)xgStart.click();' +
+      // 通用: 点击视频容器区域解除用户手势限制
+      'var v=document.querySelector("video");if(v)v.click();' +
+      // 抖音: 关闭可能的"获取应用"弹窗
+      'var modals=document.querySelectorAll("[class*=\\"guide\\"],[class*=\\"Guide\\"],[class*=\\"open-app\\"],[class*=\\"get-app\\"],[class*=\\"download-app\\"]");' +
+      'modals.forEach(function(m){if(m.querySelector&&m.querySelector("[class*=\\"close\\"]"))m.querySelector("[class*=\\"close\\"]").click();});' +
+      '})()'
+    );
+  } catch {}
+}
+
+/** 恢复播放视频窗口中所有视频（幂等，先解除覆盖层） */
 async function playVideo() {
   if (!videoWindow || videoWindow.isDestroyed()) return;
   try {
+    // 先解除覆盖层（XG-START 等），再播放
+    await dismissOverlays();
+    await new Promise(r => setTimeout(r, 300)); // 等覆盖层消失
     await videoWindow.webContents.executeJavaScript(
       'document.querySelectorAll("video").forEach(function(v){if(v.paused)v.play()})'
     );
@@ -328,10 +354,21 @@ function startMonitoring() {
 
         // 首次创建视频窗口
         createVideoWindow(targetUrl);
-        // 延迟再尝试播放（等待页面加载）
+        // 等待页面加载 → 播放（带重试）
         setTimeout(async () => {
-          await playVideo();
-        }, 3000);
+          let playing = await isVideoPlaying();
+          if (!playing) {
+            log('INFO', '[videoWin] 首次播放尝试');
+            await playVideo();
+            await new Promise(r => setTimeout(r, 4000));
+            playing = await isVideoPlaying();
+          }
+          if (!playing) {
+            log('WARN', '[videoWin] 首次播放未生效，5s 后重试');
+            await new Promise(r => setTimeout(r, 5000));
+            await playVideo();
+          }
+        }, 5000);
       }, config.delaySeconds * 1000);
     }
   });
