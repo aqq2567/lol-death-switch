@@ -891,13 +891,26 @@ function setupIPC() {
 
 // ========== 注册自定义协议（阻止 Windows 弹"无可用应用"对话框） ==========
 // 必须在 app.ready 之前注册，让 Chromium 知道这些协议由我们处理
-protocol.registerSchemesAsPrivileged([
-  { scheme: 'bitbrowser', privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
-  { scheme: 'snssdk',     privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
-  { scheme: 'bytedance',  privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
-  { scheme: 'aweme',      privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
-  { scheme: 'douyin',     privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
-]);
+// 字节系全部已知 scheme：douyin 页面广告/脚本可能通过 iframe 触发任意一个
+const BYTEDANCE_SCHEMES = [
+  'bitbrowser', 'snssdk', 'bytedance', 'aweme', 'douyin',
+  'doubao',        // 豆包 — 上次漏了这个导致朋友电脑弹出豆包
+  'sslink',        // 字节系通用 deeplink
+  'bytedanceapp',  // 字节跳动 App
+  'ttnews',        // 今日头条
+  'toutiao',       // 头条
+  'snssdk1122',    // snssdk 变体
+  'musically',     // TikTok 前身
+  'ugcvideo',      // UGC 视频
+  'ttopensdk',     // 头条开放 SDK
+];
+
+protocol.registerSchemesAsPrivileged(
+  BYTEDANCE_SCHEMES.map(s => ({
+    scheme: s,
+    privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true },
+  }))
+);
 
 // Electron应用生命周期
 app.whenReady().then(() => {
@@ -910,8 +923,7 @@ app.whenReady().then(() => {
   createTray();
 
   // 拦截所有 ByteDance 系自定义协议，返回空响应，杜绝 ShellExecute 弹窗
-  const BLOCKED_SCHEMES = ['bitbrowser', 'snssdk', 'bytedance', 'aweme', 'douyin'];
-  BLOCKED_SCHEMES.forEach(scheme => {
+  BYTEDANCE_SCHEMES.forEach(scheme => {
     try {
       protocol.handle(scheme, () => {
         log('INFO', '[protocol] 拦截 ' + scheme + ':// 请求');
