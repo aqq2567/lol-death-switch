@@ -265,18 +265,20 @@ function startMonitoring() {
     saveStats();
     sendStatsUpdate();
 
-    // 浏览器：首次用 chrome --new-window 打开，后续切回 + 发送空格恢复播放
+    // 浏览器：首次用 --new-window 打开并追踪句柄，后续用幂等媒体命令控制视频
     const urls = getTargetUrls();
     if (urls.length > 0) {
       const targetUrl = urls[0];
       setTimeout(() => {
-        // 已有窗口句柄 → 先发空格恢复播放，再切回
+        // 已有窗口句柄 → 发送幂等播放命令 + 切回浏览器
         if (browserHwnd) {
           const alive = callLolRecover(`IsAlive(${browserHwnd})`);
           if (alive === 'True') {
-            log('INFO', '[browser] 发送空格恢复播放 + 切回: ' + browserHwnd);
-            callLolRecoverAsync(`SendSpace(${browserHwnd})`);
-            return; // SendSpace 内部会 SetForegroundWindow，不需要额外切回
+            // SendPlay: APPCOMMAND_MEDIA_PLAY 幂等 — 已播放不做任何事
+            // SendPlay 内部调 SetForegroundWindow 自动切回浏览器
+            log('INFO', '[browser] 切回浏览器 + 恢复播放: ' + browserHwnd);
+            callLolRecoverAsync(`SendPlay(${browserHwnd})`);
+            return;
           }
           log('INFO', '[browser] 窗口已关闭，重新打开');
           browserHwnd = null;
@@ -326,12 +328,13 @@ function startMonitoring() {
       sendStatsUpdate();
     }
 
-    // ★ 暂停浏览器中的视频（向追踪到的窗口发送空格键）
+    // 暂停浏览器中的视频（幂等 SendPause — 已暂停不做任何事）
     if (browserHwnd) {
       const alive = callLolRecover(`IsAlive(${browserHwnd})`);
       if (alive === 'True') {
-        log('INFO', '[browser] 复活 → 暂停视频: ' + browserHwnd);
-        callLolRecover(`SendSpace(${browserHwnd})`, 2000);
+        // SendPause: APPCOMMAND_MEDIA_PAUSE 幂等 — 已暂停无效果，不抢焦点
+        log('INFO', '[browser] 复活 → 暂停视频 (幂等): ' + browserHwnd);
+        callLolRecoverAsync(`SendPause(${browserHwnd})`);
       }
     }
 
@@ -657,10 +660,40 @@ public class LolRecover
     }
 
     /// <summary>
-    /// 向指定窗口发送空格键（通用播放/暂停快捷键）
+    /// WM_APPCOMMAND — 媒体控制消息（Windows 8.1+）
+    /// APPCOMMAND_MEDIA_PLAY(46) / APPCOMMAND_MEDIA_PAUSE(47) 是独立的幂等操作：
+    /// - 已播放时 SendPlay 无效果，已暂停时 SendPause 无效果
+    /// - 不会像空格键 toggle 那样反向操作
+    /// Chrome / Edge / Firefox 均响应这些消息
     /// </summary>
     [DllImport("user32.dll")]
     static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    const uint WM_APPCOMMAND = 0x0319;
+    const int APPCOMMAND_MEDIA_PLAY = 46;
+    const int APPCOMMAND_MEDIA_PAUSE = 47;
+
+    public static void SendPlay(long hwnd)
+    {
+        if (hwnd == 0) return;
+        var h = new IntPtr(hwnd);
+        SetForegroundWindow(h);
+        System.Threading.Thread.Sleep(50);
+        SendMessage(h, WM_APPCOMMAND, h, (IntPtr)(APPCOMMAND_MEDIA_PLAY << 16));
+    }
+
+    public static void SendPause(long hwnd)
+    {
+        if (hwnd == 0) return;
+        var h = new IntPtr(hwnd);
+        // 暂停不需要抢焦点（用户已经在游戏里了）
+        PostMessage(h, WM_APPCOMMAND, h, (IntPtr)(APPCOMMAND_MEDIA_PAUSE << 16));
+    }
+
+    /// <summary>
+    /// [保留] 空格键 toggle — 降级方案，仅用于非视频页面或 WM_APPCOMMAND 不生效时
+    /// </summary>
     const uint WM_KEYDOWN = 0x0100;
     const uint WM_KEYUP = 0x0101;
     const int VK_SPACE = 0x20;
@@ -669,7 +702,6 @@ public class LolRecover
     {
         if (hwnd == 0) return;
         var h = new IntPtr(hwnd);
-        // 先聚焦窗口（否则 PostMessage 可能被忽略）
         SetForegroundWindow(h);
         System.Threading.Thread.Sleep(50);
         PostMessage(h, WM_KEYDOWN, (IntPtr)VK_SPACE, (IntPtr)1);
