@@ -186,7 +186,6 @@ public class LolRecover {
   const int SW_SHOW = 5;
   const int SW_RESTORE = 9;
 
-  // 诊断：返回指定窗口的标题+进程名。格式 "TITLE|PROCNAME"（无管道符即空标题）
   public static string Diag(long hwnd) {
     if (hwnd == 0) return "hwnd=0";
     var h = new IntPtr(hwnd);
@@ -200,14 +199,10 @@ public class LolRecover {
     return "hwnd=" + hwnd + " title=\\"" + title + "\\" proc=" + proc;
   }
 
-  // 诊断当前前台窗口
   public static string DiagFg() { return Diag(GetForegroundWindow().ToInt64()); }
 
-  // 获取当前前台窗口句柄（兜底用）
   public static long SaveFg() { return GetForegroundWindow().ToInt64(); }
 
-  // 精确查找对局客户端窗口：按进程名 "League of Legends" 搜索
-  // 排除大厅进程 LeagueClient / LeagueClientUx / RiotClientServices
   public static long FindGame() {
     try {
       var procs = Process.GetProcessesByName("League of Legends");
@@ -224,7 +219,6 @@ public class LolRecover {
     return 0;
   }
 
-  // 用保存的句柄切回。先 ShowWindow 再 SwitchToThisWindow。
   public static void Restore(long hwnd) {
     if (hwnd == 0) return;
     var h = new IntPtr(hwnd);
