@@ -3,7 +3,6 @@ const path = require('path');
 const fs = require('fs');
 const { exec, execSync } = require('child_process');
 const { LoLMonitor } = require('./lol-monitor.cjs');
-const { CdpClient } = require('./cdp-client.cjs');
 
 /** @type {BrowserWindow|null} */
 let mainWindow = null;
@@ -78,20 +77,8 @@ let afkStartTime = null;
 /** @type {string|null} 阵亡时记录的前台窗口句柄（十进制字符串），复活时用于切回 */
 let savedGameHwnd = null;
 
-/** 浏览器窗口句柄（--new-window 创建后通过快照 diff 追踪） */
-let browserHwnd = null;
-
-/** CDP 客户端（浏览器未运行时可用，提供精准视频状态查询+幂等控制） */
-let cdpClient = null;
-
-/** 当前是否使用 CDP 模式（vs toggle 降级） */
-let cdpMode = false;
-
-/** CDP 调试端口 */
-const CDP_PORT = 9222;
-
-/** 默认浏览器可执行文件路径（启动时从注册表读取并缓存） */
-let defaultBrowserExe = null;
+/** 内嵌视频窗口（Electron BrowserWindow，天然支持 executeJavaScript 控制视频） */
+let videoWindow = null;
 
 /**
  * 获取统计文件路径（%APPDATA%/lol-death-switch/stats.json）
@@ -175,76 +162,82 @@ function sendStatsUpdate() {
   }
 }
 
+// ========== 内嵌视频窗口（Electron BrowserWindow） ==========
+
 /**
- * 从 Windows 注册表读取默认浏览器可执行文件路径
- * @returns {string|null}
+ * 创建内嵌视频窗口
+ * 使用 Electron 自带 Chromium，webContents.executeJavaScript() = 天然 CDP
+ * @param {string} url
  */
-function findDefaultBrowser() {
-  try {
-    const progIdOut = execSync(
-      'reg query "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice" /v ProgId',
-      { encoding: 'utf-8', timeout: 3000 }
-    );
-    const progMatch = progIdOut.match(/ProgId\s+REG_SZ\s+(.+)/);
-    if (!progMatch) return null;
-    const progId = progMatch[1].trim();
-
-    const cmdOut = execSync(
-      `reg query "HKCR\\${progId}\\shell\\open\\command" /ve`,
-      { encoding: 'utf-8', timeout: 3000 }
-    );
-    const cmdMatch = cmdOut.match(/REG_SZ\s+(.+)/);
-    if (!cmdMatch) return null;
-
-    const exeMatch = cmdMatch[1].trim().match(/"([^"]+\.exe)"/i);
-    return exeMatch ? exeMatch[1] : null;
-  } catch {
-    return null;
+function createVideoWindow(url) {
+  if (videoWindow && !videoWindow.isDestroyed()) {
+    videoWindow.loadURL(url);
+    return;
   }
+  videoWindow = new BrowserWindow({
+    width: 1100,
+    height: 700,
+    title: '摸鱼中...',
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.cjs'),
+    },
+    show: true,
+  });
+  videoWindow.loadURL(url);
+  videoWindow.on('closed', () => { videoWindow = null; });
+  log('INFO', '[videoWin] 创建视频窗口: ' + url);
 }
 
-/**
- * 检测默认浏览器是否已在运行（决定能否使用 CDP）
- * CDP 需要 --remote-debugging-port，该参数仅在浏览器首次启动时生效
- * @param {string} browserPath
- * @returns {boolean}
- */
-function isBrowserRunning(browserPath) {
-  const procName = path.basename(browserPath, '.exe');
+/** 暂停视频窗口中所有视频（幂等） */
+async function pauseVideo() {
+  if (!videoWindow || videoWindow.isDestroyed()) return;
   try {
-    const out = execSync(`tasklist /FI "IMAGENAME eq ${procName}.exe"`, { encoding: 'utf-8', timeout: 3000 });
-    return out.includes(`${procName}.exe`);
+    await videoWindow.webContents.executeJavaScript(
+      'document.querySelectorAll("video").forEach(function(v){if(!v.paused)v.pause()})'
+    );
+  } catch {}
+}
+
+/** 恢复播放视频窗口中所有视频（幂等） */
+async function playVideo() {
+  if (!videoWindow || videoWindow.isDestroyed()) return;
+  try {
+    await videoWindow.webContents.executeJavaScript(
+      'document.querySelectorAll("video").forEach(function(v){if(v.paused)v.play()})'
+    );
+  } catch {}
+}
+
+/** 查询视频窗口是否有视频正在播放 */
+async function isVideoPlaying() {
+  if (!videoWindow || videoWindow.isDestroyed()) return false;
+  try {
+    return await videoWindow.webContents.executeJavaScript(
+      'Array.from(document.querySelectorAll("video")).some(function(v){return !v.paused && !v.ended})'
+    );
   } catch {
     return false;
   }
 }
 
-/**
- * 快照当前所有可见浏览器窗口句柄
- * @returns {string[]}
- */
-function snapshotBrowsers() {
-  try {
-    const raw = callLolRecover('SnapshotBrowsers()');
-    return raw ? raw.split('|').filter(Boolean) : [];
-  } catch {
-    return [];
-  }
+/** 显示/聚焦视频窗口 */
+function showVideoWindow() {
+  if (!videoWindow || videoWindow.isDestroyed()) return;
+  if (videoWindow.isMinimized()) videoWindow.restore();
+  videoWindow.show();
+  videoWindow.focus();
 }
 
-/**
- * 从前后快照中找出新增的窗口句柄
- * @param {string[]} before
- * @returns {string|null}
- */
-function findNewWindow(before) {
-  const after = snapshotBrowsers();
-  const beforeSet = new Set(before);
-  for (const h of after) {
-    if (!beforeSet.has(h)) return h;
-  }
-  return null;
+/** 隐藏视频窗口 */
+function hideVideoWindow() {
+  if (!videoWindow || videoWindow.isDestroyed()) return;
+  videoWindow.minimize();
 }
+
+// ========== LoL 监控 ==========
 
 /**
  * 启动 LoL 监控（提取为可复用函数）
@@ -254,10 +247,11 @@ function startMonitoring() {
   if (lolMonitor) {
     lolMonitor.stop();
   }
-  // 重置浏览器追踪和 CDP（每次启动监控视为新的游戏会话）
-  if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
-  cdpMode = false;
-  browserHwnd = null;
+  // 重置视频窗口（每次启动监控视为新的游戏会话）
+  if (videoWindow && !videoWindow.isDestroyed()) {
+    videoWindow.close();
+    videoWindow = null;
+  }
   lolMonitor = new LoLMonitor(config.pollInterval, log);
   lolMonitor.start();
 
@@ -270,7 +264,7 @@ function startMonitoring() {
 
   // 监听阵亡事件
   lolMonitor.on('death-event', () => {
-    // ★ 先保存对局窗口句柄（必须在浏览器抢焦点之前）
+    // ★ 先保存对局窗口句柄（必须在视频窗口抢焦点之前）
     saveGameWindow();
 
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -286,101 +280,36 @@ function startMonitoring() {
     saveStats();
     sendStatsUpdate();
 
-    // 浏览器：--new-window 创建独立窗口 + CDP/toggle 混合视频控制
+    // 视频窗口：Electron BrowserWindow 内嵌，无外部浏览器依赖
     const urls = getTargetUrls();
     if (urls.length > 0) {
       const targetUrl = urls[0];
       setTimeout(async () => {
-        // 已有窗口 → 恢复播放 + 切回浏览器
-        if (browserHwnd) {
-          const alive = callLolRecover(`IsAlive(${browserHwnd})`);
-          if (alive === 'True') {
-            if (cdpMode && cdpClient && cdpClient.isConnected) {
-              // CDP：查询状态 → 只在暂停时播放
-              try {
-                const playing = await cdpClient.isVideoPlaying();
-                if (playing === false) {
-                  log('INFO', '[browser] CDP: 暂停中 → 恢复播放');
-                  await cdpClient.playVideo();
-                } else {
-                  log('INFO', '[browser] CDP: 已在播放，仅切回');
-                }
-              } catch {
-                log('WARN', '[browser] CDP 查询失败，WM_APPCOMMAND 降级');
-                callLolRecoverAsync(`SendPlay(${browserHwnd})`);
-              }
-            } else {
-              // 降级：WM_APPCOMMAND toggle
-              log('INFO', '[browser] Toggle 模式: 恢复播放 + 切回: ' + browserHwnd);
-              callLolRecoverAsync(`SendPlay(${browserHwnd})`);
-            }
-            return;
+        // 窗口已存在 → 恢复播放 + 显示
+        if (videoWindow && !videoWindow.isDestroyed()) {
+          const playing = await isVideoPlaying();
+          if (!playing) {
+            log('INFO', '[videoWin] 暂停中 → 恢复播放');
+            await playVideo();
+          } else {
+            log('INFO', '[videoWin] 已在播放，仅显示');
           }
-          log('INFO', '[browser] 窗口已关闭，重新打开');
-          if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
-          cdpMode = false;
-          browserHwnd = null;
-        }
-
-        // 首次打开
-        const browserPath = defaultBrowserExe || findDefaultBrowser();
-        if (!browserPath) {
-          log('WARN', '[browser] 未检测到默认浏览器，fallback shell.openExternal');
-          shell.openExternal(targetUrl);
-          browserHwnd = null;
-          cdpMode = false;
+          showVideoWindow();
           return;
         }
-        defaultBrowserExe = browserPath;
 
-        const browserAlreadyRunning = isBrowserRunning(browserPath);
-        const before = snapshotBrowsers();
-
-        if (browserAlreadyRunning) {
-          // 浏览器已在运行 → CDP 不可用 → --new-window + toggle
-          cdpMode = false;
-          exec(`start "" "${browserPath}" --new-window "${targetUrl}"`);
-          log('INFO', '[browser] 浏览器已运行，Toggle 模式: ' + targetUrl);
-        } else {
-          // 浏览器未运行 → --remote-debugging-port → CDP 可用
-          exec(`start "" "${browserPath}" --new-window --remote-debugging-port=${CDP_PORT} "${targetUrl}"`);
-          log('INFO', '[browser] 浏览器未运行，CDP 模式: ' + targetUrl);
-        }
-
-        // 窗口追踪 + CDP 连接
+        // 首次创建视频窗口
+        createVideoWindow(targetUrl);
+        // 延迟再尝试播放（等待页面加载）
         setTimeout(async () => {
-          const hwnd = findNewWindow(before);
-          if (hwnd) {
-            browserHwnd = hwnd;
-            log('INFO', '[browser] 追踪到窗口: ' + hwnd);
-          } else {
-            log('WARN', '[browser] 未能追踪新窗口');
-          }
-
-          if (!browserAlreadyRunning && browserHwnd) {
-            // 尝试 CDP 连接（重试 3 次）
-            cdpClient = new CdpClient(log);
-            for (let attempt = 0; attempt < 3; attempt++) {
-              const ok = await cdpClient.connect(CDP_PORT);
-              if (ok) {
-                cdpMode = true;
-                log('INFO', '[browser] CDP 连接成功 (尝试 ' + (attempt + 1) + ')');
-                return;
-              }
-              if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
-            }
-            log('WARN', '[browser] CDP 连接失败，降级 Toggle 模式');
-            cdpClient.disconnect();
-            cdpClient = null;
-            cdpMode = false;
-          }
-        }, 2500);
+          await playVideo();
+        }, 3000);
       }, config.delaySeconds * 1000);
     }
   });
 
   // 监听复活事件 — 暂停视频 + 切回 LoL
-  lolMonitor.on('revive-event', () => {
+  lolMonitor.on('revive-event', async () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('revive-event', {
         timestamp: Date.now(),
@@ -396,28 +325,16 @@ function startMonitoring() {
       sendStatsUpdate();
     }
 
-    // ★ 暂停浏览器视频
-    if (browserHwnd) {
-      const alive = callLolRecover(`IsAlive(${browserHwnd})`);
-      if (alive === 'True') {
-        if (cdpMode && cdpClient && cdpClient.isConnected) {
-          // CDP：查询状态 → 只在播放时暂停（已暂停=跳过，不反悔用户）
-          cdpClient.isVideoPlaying().then(playing => {
-            if (playing === true) {
-              log('INFO', '[browser] CDP: 播放中 → 暂停');
-              cdpClient.pauseVideo();
-            } else {
-              log('INFO', '[browser] CDP: 已暂停或无法确定，跳过');
-            }
-          }).catch(() => {
-            log('WARN', '[browser] CDP 查询失败');
-          });
-        } else {
-          // Toggle 降级
-          log('INFO', '[browser] Toggle 模式: 暂停视频: ' + browserHwnd);
-          callLolRecoverAsync(`SendPause(${browserHwnd})`);
-        }
+    // ★ 暂停视频窗口中正在播放的视频
+    if (videoWindow && !videoWindow.isDestroyed()) {
+      const playing = await isVideoPlaying();
+      if (playing) {
+        log('INFO', '[videoWin] 播放中 → 暂停');
+        await pauseVideo();
+      } else {
+        log('INFO', '[videoWin] 已暂停或无法确定，跳过');
       }
+      hideVideoWindow();
     }
 
     // ★ 用阵亡时保存的句柄切回游戏窗口
@@ -433,9 +350,10 @@ function stopMonitoring() {
     lolMonitor.stop();
     lolMonitor = null;
   }
-  if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
-  cdpMode = false;
-  browserHwnd = null;
+  if (videoWindow && !videoWindow.isDestroyed()) {
+    videoWindow.close();
+    videoWindow = null;
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('status-update', {
       state: 'idle',
@@ -666,131 +584,6 @@ public class LolRecover
         keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
     }
 
-    [DllImport("user32.dll")]
-    static extern bool IsWindow(IntPtr hWnd);
-
-    /// <summary>
-    /// 检测窗口句柄是否仍然有效
-    /// </summary>
-    public static bool IsAlive(long hwnd)
-    {
-        if (hwnd == 0) return false;
-        return IsWindow(new IntPtr(hwnd));
-    }
-
-    /// <summary>
-    /// 快照当前所有可见浏览器窗口句柄（管道分隔）
-    /// 进程名匹配: chrome, msedge, firefox, brave
-    /// </summary>
-    public static string SnapshotBrowsers()
-    {
-        var names = new[] { "chrome", "msedge", "firefox", "brave" };
-        var list = new System.Collections.Generic.List<string>();
-        foreach (var name in names)
-        {
-            try
-            {
-                var procs = Process.GetProcessesByName(name);
-                foreach (var p in procs)
-                {
-                    try
-                    {
-                        var h = p.MainWindowHandle;
-                        if (h != IntPtr.Zero)
-                        {
-                            var sb = new StringBuilder(256);
-                            GetWindowText(h, sb, 256);
-                            if (sb.Length > 0)
-                                list.Add(h.ToInt64().ToString());
-                        }
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-        }
-        return string.Join("|", list);
-    }
-
-    /// <summary>
-    /// 查找任意可见浏览器窗口，返回其句柄
-    /// </summary>
-    public static long FindBrowser()
-    {
-        var names = new[] { "chrome", "msedge", "firefox", "brave" };
-        foreach (var name in names)
-        {
-            try
-            {
-                var procs = Process.GetProcessesByName(name);
-                foreach (var p in procs)
-                {
-                    try
-                    {
-                        var h = p.MainWindowHandle;
-                        if (h != IntPtr.Zero)
-                        {
-                            var sb = new StringBuilder(256);
-                            GetWindowText(h, sb, 256);
-                            if (sb.Length > 0) return h.ToInt64();
-                        }
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-        }
-        return 0;
-    }
-
-    /// <summary>
-    /// WM_APPCOMMAND — 媒体控制消息（Windows 8.1+）
-    /// APPCOMMAND_MEDIA_PLAY(46) / APPCOMMAND_MEDIA_PAUSE(47) 是独立的幂等操作：
-    /// - 已播放时 SendPlay 无效果，已暂停时 SendPause 无效果
-    /// - 不会像空格键 toggle 那样反向操作
-    /// Chrome / Edge / Firefox 均响应这些消息
-    /// </summary>
-    [DllImport("user32.dll")]
-    static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")]
-    static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-    const uint WM_APPCOMMAND = 0x0319;
-    const int APPCOMMAND_MEDIA_PLAY = 46;
-    const int APPCOMMAND_MEDIA_PAUSE = 47;
-
-    public static void SendPlay(long hwnd)
-    {
-        if (hwnd == 0) return;
-        var h = new IntPtr(hwnd);
-        SetForegroundWindow(h);
-        System.Threading.Thread.Sleep(50);
-        SendMessage(h, WM_APPCOMMAND, h, (IntPtr)(APPCOMMAND_MEDIA_PLAY << 16));
-    }
-
-    public static void SendPause(long hwnd)
-    {
-        if (hwnd == 0) return;
-        var h = new IntPtr(hwnd);
-        // 暂停不需要抢焦点（用户已经在游戏里了）
-        PostMessage(h, WM_APPCOMMAND, h, (IntPtr)(APPCOMMAND_MEDIA_PAUSE << 16));
-    }
-
-    /// <summary>
-    /// [保留] 空格键 toggle — 降级方案，仅用于非视频页面或 WM_APPCOMMAND 不生效时
-    /// </summary>
-    const uint WM_KEYDOWN = 0x0100;
-    const uint WM_KEYUP = 0x0101;
-    const int VK_SPACE = 0x20;
-
-    public static void SendSpace(long hwnd)
-    {
-        if (hwnd == 0) return;
-        var h = new IntPtr(hwnd);
-        SetForegroundWindow(h);
-        System.Threading.Thread.Sleep(50);
-        PostMessage(h, WM_KEYDOWN, (IntPtr)VK_SPACE, (IntPtr)1);
-        PostMessage(h, WM_KEYUP, (IntPtr)VK_SPACE, (IntPtr)0xC0000001);
-    }
 }
 `.trim();
 
