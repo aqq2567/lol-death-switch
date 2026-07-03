@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "vite build && electron-builder"
+    "electron:build": "vite build && electron-builder",
+    "smoke-test": "electron electron/smoke-test.cjs"
   },
   "dependencies": {
     "@emotion/react": "^11.11.4",
@@ -31,17 +32,34 @@
   },
   "build": {
     "appId": "com.lol-death-switch.app",
-    "productName": "LoL Death Switch",
+    "productName": "死了就摸鱼吧",
     "directories": {
-      "output": "dist-electron"
+      "output": "release"
     },
     "files": [
       "dist/**/*",
       "electron/**/*",
       "assets/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "assets/",
+        "to": "assets/"
+      }
+    ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "死了就摸鱼吧"
     }
   }
 }

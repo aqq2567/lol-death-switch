@@ -4,6 +4,7 @@ node_modules/
 # Build output
 dist/
 dist-electron/
+release/
 
 # Environment variables
 .env
@@ -28,3 +29,14 @@ npm-debug.log*
 
 # Electron builder cache
 *.blockmap
+
+# User runtime data (should never be in project, just defense)
+custom-urls.json
+stats.json
+LolRecover.cs
+
+# Executables
+*.exe
+
+# Temp/scratch files
+*.tmp
