@@ -19,10 +19,6 @@
 - **数据统计** — 累计阵亡次数、AFK 总时长，持久化保存
 - **LoL 主题 UI** — 英雄联盟暗金风格界面
 
-## 📸 截图
-
-![主界面](assets/screenshots/app-screenshot.png)
-
 ## 🔧 技术栈
 
 | 层 | 技术 |
