@@ -3,7 +3,6 @@ const path = require('path');
 const fs = require('fs');
 const { exec, execSync } = require('child_process');
 const { LoLMonitor } = require('./lol-monitor.cjs');
-const { CdpClient, isChromium } = require('./cdp-client.cjs');
 
 /** @type {BrowserWindow|null} */
 let mainWindow = null;
@@ -81,14 +80,8 @@ let savedGameHwnd = null;
 /** 浏览器窗口句柄（打开后追踪，用于发送空格键和切回） */
 let browserHwnd = null;
 
-/** CDP 客户端（Chromium 系浏览器精确视频控制，Firefox 降级为 SendSpace） */
-let cdpClient = null;
-
 /** 默认浏览器可执行文件路径（启动时从注册表读取） */
 let defaultBrowserExe = null;
-
-/** CDP 调试端口 */
-const CDP_PORT = 9222;
 
 /**
  * 获取统计文件路径（%APPDATA%/lol-death-switch/stats.json）
@@ -242,8 +235,7 @@ function startMonitoring() {
   if (lolMonitor) {
     lolMonitor.stop();
   }
-  // 重置浏览器追踪和 CDP（每次启动监控视为新的游戏会话）
-  if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
+  // 重置浏览器追踪（每次启动监控视为新的游戏会话）
   browserHwnd = null;
   lolMonitor = new LoLMonitor(config.pollInterval, log);
   lolMonitor.start();
@@ -273,95 +265,38 @@ function startMonitoring() {
     saveStats();
     sendStatsUpdate();
 
-    // 浏览器：首次用 --new-window 打开并追踪句柄，后续切回 + 恢复播放
+    // 浏览器：首次用 chrome --new-window 打开，后续切回 + 发送空格恢复播放
     const urls = getTargetUrls();
     if (urls.length > 0) {
       const targetUrl = urls[0];
-      setTimeout(async () => {
-        // 已有窗口句柄 → 尝试恢复播放（CDP 精确控制，或 SendSpace 降级）
+      setTimeout(() => {
+        // 已有窗口句柄 → 先发空格恢复播放，再切回
         if (browserHwnd) {
           const alive = callLolRecover(`IsAlive(${browserHwnd})`);
           if (alive === 'True') {
-            if (cdpClient && cdpClient.isConnected) {
-              // CDP 路径：查询状态 → 只在暂停时播放（幂等）
-              try {
-                const isPlaying = await cdpClient.isVideoPlaying();
-                if (isPlaying === false) {
-                  log('INFO', '[browser] CDP: 视频暂停中 → 恢复播放');
-                  await cdpClient.playVideo();
-                } else if (isPlaying === true) {
-                  log('INFO', '[browser] CDP: 视频已在播放，仅切回窗口');
-                  // 视频已在播放（用户手动点了播放），只需切回
-                } else {
-                  // 无 video 元素，可能不是视频页面，降级 SendSpace
-                  log('INFO', '[browser] CDP: 无 video 元素，SendSpace 降级');
-                  callLolRecoverAsync(`SendSpace(${browserHwnd})`);
-                  return;
-                }
-              } catch {
-                log('WARN', '[browser] CDP 查询失败，SendSpace 降级');
-                callLolRecoverAsync(`SendSpace(${browserHwnd})`);
-                return;
-              }
-            } else {
-              // 非 Chromium 浏览器降级：SendSpace toggle
-              log('INFO', '[browser] 非 CDP 模式，SendSpace 降级: ' + browserHwnd);
-              callLolRecoverAsync(`SendSpace(${browserHwnd})`);
-              return;
-            }
-            // 切回浏览器（CDP 路径到这里说明需要切回）
-            log('INFO', '[browser] 切回浏览器窗口: ' + browserHwnd);
-            callLolRecoverAsync(`Restore(${browserHwnd})`);
-            return;
+            log('INFO', '[browser] 发送空格恢复播放 + 切回: ' + browserHwnd);
+            callLolRecoverAsync(`SendSpace(${browserHwnd})`);
+            return; // SendSpace 内部会 SetForegroundWindow，不需要额外切回
           }
-          log('INFO', '[browser] 窗口已关闭，清理 CDP 并重新打开');
-          if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
+          log('INFO', '[browser] 窗口已关闭，重新打开');
           browserHwnd = null;
         }
 
-        // 首次打开：用默认浏览器 --new-window 创建独立窗口
+        // 首次打开：用默认浏览器 --new-window 创建独立窗口以便追踪句柄
         const browserPath = defaultBrowserExe || findDefaultBrowser();
         if (browserPath) {
           defaultBrowserExe = browserPath;
-          const useCdp = isChromium(browserPath);
           const before = snapshotBrowsers();
-
-          if (useCdp) {
-            // Chromium 系：带 --remote-debugging-port 启动，后续用 CDP 精确控制视频
-            const userDataDir = path.join(app.getPath('userData'), 'browser-cdp-profile');
-            if (!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir, { recursive: true });
-            exec(`start "" "${browserPath}" --new-window --remote-debugging-port=${CDP_PORT} --user-data-dir="${userDataDir}" "${targetUrl}"`);
-            log('INFO', '[browser] 启动 Chromium CDP 模式: ' + targetUrl);
-          } else {
-            // Firefox 等：标准 --new-window，视频控制走 SendSpace 降级
-            exec(`start "" "${browserPath}" --new-window "${targetUrl}"`);
-            log('INFO', '[browser] 启动非 Chromium 浏览器（SendSpace 降级）: ' + targetUrl);
-          }
-
-          // 等浏览器窗口创建后，追踪句柄 + 连接 CDP
-          setTimeout(async () => {
+          exec(`start "" "${browserPath}" --new-window "${targetUrl}"`);
+          log('INFO', '[browser] 启动默认浏览器 --new-window: ' + targetUrl);
+          // 等浏览器窗口创建后，找到新句柄
+          setTimeout(() => {
             const hwnd = findNewWindow(before);
             if (hwnd) {
               browserHwnd = hwnd;
               log('INFO', '[browser] 追踪到窗口: ' + hwnd);
             } else {
               log('WARN', '[browser] 未能追踪新窗口');
-            }
-
-            // Chromium 浏览器：尝试 CDP 连接（重试最多 3 次，每次间隔 1s）
-            if (useCdp && browserHwnd) {
-              for (let attempt = 0; attempt < 3; attempt++) {
-                if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
-                cdpClient = new CdpClient(log);
-                const ok = await cdpClient.connect(CDP_PORT);
-                if (ok) {
-                  log('INFO', '[browser] CDP 连接成功 (尝试 ' + (attempt + 1) + ')');
-                  return;
-                }
-                log('WARN', '[browser] CDP 连接失败 (尝试 ' + (attempt + 1) + '/3)');
-                if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
-              }
-              log('WARN', '[browser] CDP 连接最终失败，降级为 SendSpace 模式');
             }
           }, 2500);
         } else {
@@ -375,7 +310,7 @@ function startMonitoring() {
   });
 
   // 监听复活事件 — 自动切回LoL窗口 + 统计摸鱼时间
-  lolMonitor.on('revive-event', async () => {
+  lolMonitor.on('revive-event', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('revive-event', {
         timestamp: Date.now(),
@@ -391,37 +326,16 @@ function startMonitoring() {
       sendStatsUpdate();
     }
 
-    // 暂停浏览器中的视频
+    // ★ 暂停浏览器中的视频（向追踪到的窗口发送空格键）
     if (browserHwnd) {
       const alive = callLolRecover(`IsAlive(${browserHwnd})`);
       if (alive === 'True') {
-        if (cdpClient && cdpClient.isConnected) {
-          // CDP 路径：查询状态 → 只在播放时暂停（幂等，不反悔用户手动暂停）
-          try {
-            const isPlaying = await cdpClient.isVideoPlaying();
-            if (isPlaying === true) {
-              log('INFO', '[browser] CDP: 视频播放中 → 暂停');
-              await cdpClient.pauseVideo();
-            } else if (isPlaying === false) {
-              log('INFO', '[browser] CDP: 视频已暂停（用户手动停的），跳过');
-            } else {
-              // 无 video → 降级 SendSpace
-              log('INFO', '[browser] CDP: 无 video 元素，SendSpace 降级');
-              callLolRecover(`SendSpace(${browserHwnd})`, 2000);
-            }
-          } catch {
-            log('WARN', '[browser] CDP 暂停失败，SendSpace 降级');
-            callLolRecover(`SendSpace(${browserHwnd})`, 2000);
-          }
-        } else {
-          // 非 Chromium 降级
-          log('INFO', '[browser] 非 CDP 模式，SendSpace 降级: ' + browserHwnd);
-          callLolRecover(`SendSpace(${browserHwnd})`, 2000);
-        }
+        log('INFO', '[browser] 复活 → 暂停视频: ' + browserHwnd);
+        callLolRecover(`SendSpace(${browserHwnd})`, 2000);
       }
     }
 
-    // 用阵亡时保存的句柄切回游戏窗口
+    // ★ 用阵亡时保存的句柄切回游戏窗口
     restoreGameWindow();
   });
 }
@@ -434,7 +348,6 @@ function stopMonitoring() {
     lolMonitor.stop();
     lolMonitor = null;
   }
-  if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
   browserHwnd = null;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('status-update', {
