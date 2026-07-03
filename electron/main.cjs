@@ -160,89 +160,127 @@ function getTargetUrls() {
 // ========== 前台窗口保存/复原（阵亡→自动切出 → 复活→自动切回） ==========
 
 /**
- * C# 辅助类：LoL窗口诊断 + 精确定位对局客户端 + 窗口复原
- *
- * 核心逻辑：
- * - LoL 有两个窗口："LeagueClient.exe"(大厅) 和 "League of Legends.exe"(对局)
- * - 阵亡时不能简单抓前台窗口（死亡回放可能属于大厅进程），
- *   必须通过进程名 "League of Legends" 精确定位对局窗口
- * - Diag() 输出当前前台窗口的诊断信息，用于排查问题
- * - FindGame() 枚举进程找到对局窗口句柄
+ * C# 辅助类文件内容
+ * 写入临时 .cs 文件，通过 Add-Type -Path 加载，避免 here-string 压缩编码问题
  */
-const LOL_SAVE_RESTORE_PS = `
-Add-Type -TypeDefinition @'
+const LOL_CS_CODE = `
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
-public class LolRecover {
-  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
-  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport("user32.dll")] static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
-  const int SW_SHOW = 5;
-  const int SW_RESTORE = 9;
+public class LolRecover
+{
+    [DllImport("user32.dll")]
+    static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+    [DllImport("user32.dll")]
+    static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
-  public static string Diag(long hwnd) {
-    if (hwnd == 0) return "hwnd=0";
-    var h = new IntPtr(hwnd);
-    var sb = new StringBuilder(256);
-    GetWindowText(h, sb, 256);
-    string title = sb.ToString();
-    uint pid;
-    GetWindowThreadProcessId(h, out pid);
-    string proc = "";
-    try { proc = Process.GetProcessById((int)pid).ProcessName; } catch { proc = "?"; }
-    return "hwnd=" + hwnd + " title=\\"" + title + "\\" proc=" + proc;
-  }
+    const int SW_SHOW = 5;
+    const int SW_RESTORE = 9;
 
-  public static string DiagFg() { return Diag(GetForegroundWindow().ToInt64()); }
+    public static string Diag(long hwnd)
+    {
+        if (hwnd == 0) return "hwnd=0";
+        var h = new IntPtr(hwnd);
+        var sb = new StringBuilder(256);
+        GetWindowText(h, sb, 256);
+        string title = sb.ToString();
+        uint pid;
+        GetWindowThreadProcessId(h, out pid);
+        string proc = "";
+        try { proc = Process.GetProcessById((int)pid).ProcessName; } catch { proc = "?"; }
+        return "hwnd=" + hwnd + " title=\"" + title + "\" proc=" + proc;
+    }
 
-  public static long SaveFg() { return GetForegroundWindow().ToInt64(); }
+    public static string DiagFg()
+    {
+        return Diag(GetForegroundWindow().ToInt64());
+    }
 
-  public static long FindGame() {
-    try {
-      var procs = Process.GetProcessesByName("League of Legends");
-      foreach (var p in procs) {
-        try {
-          var h = p.MainWindowHandle;
-          if (h == IntPtr.Zero) continue;
-          var sb = new StringBuilder(256);
-          GetWindowText(h, sb, 256);
-          if (sb.Length > 0) return h.ToInt64();
-        } catch {}
-      }
-    } catch {}
-    return 0;
-  }
+    public static long SaveFg()
+    {
+        return GetForegroundWindow().ToInt64();
+    }
 
-  public static void Restore(long hwnd) {
-    if (hwnd == 0) return;
-    var h = new IntPtr(hwnd);
-    ShowWindow(h, SW_RESTORE);
-    ShowWindow(h, SW_SHOW);
-    SetForegroundWindow(h);
-    SwitchToThisWindow(h, false);
-  }
+    public static long FindGame()
+    {
+        try
+        {
+            var procs = Process.GetProcessesByName("League of Legends");
+            foreach (var p in procs)
+            {
+                try
+                {
+                    var h = p.MainWindowHandle;
+                    if (h == IntPtr.Zero) continue;
+                    var sb = new StringBuilder(256);
+                    GetWindowText(h, sb, 256);
+                    if (sb.Length > 0) return h.ToInt64();
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return 0;
+    }
+
+    public static void Restore(long hwnd)
+    {
+        if (hwnd == 0) return;
+        var h = new IntPtr(hwnd);
+        ShowWindow(h, SW_RESTORE);
+        ShowWindow(h, SW_SHOW);
+        SetForegroundWindow(h);
+        SwitchToThisWindow(h, false);
+    }
 }
-'@
-`.replace(/\n/g, ' ').replace(/\s\s+/g, ' ').trim();
+`.trim();
+
+/** C# 文件路径（临时目录） */
+let lolCsPath = null;
 
 /**
- * 执行 PowerShell 脚本并返回 stdout
+ * 初始化 C# 辅助类：写 .cs 文件 → Add-Type 编译加载
+ * 仅在应用启动时执行一次
  */
-function runPS(script, timeout = 5000) {
-  const cmd = `powershell -NoProfile -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
+function initLolRecover() {
+  lolCsPath = path.join(app.getPath('userData'), 'LolRecover.cs');
+  fs.writeFileSync(lolCsPath, LOL_CS_CODE, 'utf-8');
+
+  try {
+    const psScript = `Add-Type -Path '${lolCsPath}'`;
+    const cmd = `powershell -NoProfile -EncodedCommand ${Buffer.from(psScript, 'utf16le').toString('base64')}`;
+    execSync(cmd, { encoding: 'utf-8', timeout: 10000 });
+    log('INFO', '[initLolRecover] C# 类编译成功');
+  } catch (err) {
+    log('ERROR', '[initLolRecover] C# 编译失败: ' + err.message);
+  }
+}
+
+/**
+ * 执行 PowerShell 方法调用并返回 stdout
+ * LolRecover 类已在 initLolRecover() 中加载，此处只需调用静态方法
+ */
+function callLolRecover(methodCall, timeout = 5000) {
+  const psScript = `[LolRecover]::${methodCall}`;
+  const cmd = `powershell -NoProfile -EncodedCommand ${Buffer.from(psScript, 'utf16le').toString('base64')}`;
   return execSync(cmd, { encoding: 'utf-8', timeout }).trim();
 }
 
-function runPSAsync(script, callback) {
-  const cmd = `powershell -NoProfile -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
-  exec(cmd, (err, stdout, stderr) => {
-    if (callback) callback(err, stdout ? stdout.trim() : '', stderr ? stderr.trim() : '');
+function callLolRecoverAsync(methodCall, callback) {
+  const psScript = `[LolRecover]::${methodCall}`;
+  const cmd = `powershell -NoProfile -EncodedCommand ${Buffer.from(psScript, 'utf16le').toString('base64')}`;
+  exec(cmd, (err, stdout) => {
+    if (callback) callback(err, stdout ? stdout.trim() : '');
   });
 }
 
@@ -253,33 +291,28 @@ function runPSAsync(script, callback) {
  * 1. 通过进程名 "League of Legends" 查找对局窗口（最可靠）
  * 2. 回退到当前前台窗口（如果游戏恰好在前台）
  * 3. 都失败则清空句柄，复活时走最小化兜底
- *
- * 每步都有日志输出，便于定位问题。
  */
 function saveGameWindow() {
   try {
-    // ★ 诊断日志：当前前台窗口是什么？
-    const diag = runPS(LOL_SAVE_RESTORE_PS + ' [LolRecover]::DiagFg()');
+    const diag = callLolRecover('DiagFg()');
     log('INFO', '[saveGameWindow] 当前前台窗口: ' + diag);
 
-    // ★ 主策略：按进程名查找对局客户端
-    const gameHwnd = runPS(LOL_SAVE_RESTORE_PS + ' [LolRecover]::FindGame()');
+    const gameHwnd = callLolRecover('FindGame()');
     if (gameHwnd && gameHwnd !== '0') {
       savedGameHwnd = gameHwnd;
-      const gameDiag = runPS(LOL_SAVE_RESTORE_PS + ` [LolRecover]::Diag(${gameHwnd})`);
-      log('INFO', '[saveGameWindow] ✓ 通过进程名找到对局窗口: ' + gameDiag);
+      const gameDiag = callLolRecover(`Diag(${gameHwnd})`);
+      log('INFO', '[saveGameWindow] 通过进程名找到对局窗口: ' + gameDiag);
       return;
     }
 
-    // ★ 回退：前台窗口
-    const fgHwnd = runPS(LOL_SAVE_RESTORE_PS + ' [LolRecover]::SaveFg()');
+    const fgHwnd = callLolRecover('SaveFg()');
     if (fgHwnd && fgHwnd !== '0') {
       savedGameHwnd = fgHwnd;
-      log('WARN', '[saveGameWindow] ⚠ 未找到对局进程，回退到前台窗口: hwnd=' + fgHwnd);
+      log('WARN', '[saveGameWindow] 未找到对局进程，回退到前台窗口: hwnd=' + fgHwnd);
       return;
     }
 
-    log('WARN', '[saveGameWindow] ✗ 无法获取任何窗口句柄');
+    log('WARN', '[saveGameWindow] 无法获取任何窗口句柄');
     savedGameHwnd = null;
   } catch (err) {
     log('ERROR', '[saveGameWindow] 异常: ' + err.message);
@@ -303,19 +336,17 @@ function restoreGameWindow() {
   const hwnd = savedGameHwnd;
   log('INFO', '[restoreGameWindow] 即将切回窗口: ' + hwnd);
 
-  runPSAsync(LOL_SAVE_RESTORE_PS + ` [LolRecover]::Restore(${hwnd})`, (err) => {
+  callLolRecoverAsync(`Restore(${hwnd})`, (err) => {
     if (err) {
       log('ERROR', '[restoreGameWindow] 切回失败: ' + err.message);
-      // 兜底：最小化本窗口
       if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized()) {
         mainWindow.minimize();
       }
     } else {
-      log('INFO', '[restoreGameWindow] ✓ 已切回窗口: ' + hwnd);
+      log('INFO', '[restoreGameWindow] 已切回窗口: ' + hwnd);
     }
   });
 
-  // 清掉句柄，下次阵亡重新获取
   savedGameHwnd = null;
 }
 
@@ -452,6 +483,7 @@ function setupIPC() {
 // Electron应用生命周期
 app.whenReady().then(() => {
   initLogger();
+  initLolRecover();
   loadStats();
   setupIPC();
   createWindow();
