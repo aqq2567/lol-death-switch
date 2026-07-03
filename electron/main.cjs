@@ -184,9 +184,16 @@ function createVideoWindow(url) {
       nodeIntegration: false,
       preload: path.join(__dirname, 'preload.cjs'),
     },
-    show: true,
+    show: false, // 先隐藏，等 ready-to-show 再显示，避免白屏闪烁
   });
+  // 伪装成常规 Chrome 浏览器，避免抖音弹出"获取应用"
+  videoWindow.webContents.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  );
   videoWindow.loadURL(url);
+  videoWindow.once('ready-to-show', () => {
+    showVideoWindow();
+  });
   videoWindow.on('closed', () => { videoWindow = null; });
   log('INFO', '[videoWin] 创建视频窗口: ' + url);
 }
@@ -223,12 +230,20 @@ async function isVideoPlaying() {
   }
 }
 
-/** 显示/聚焦视频窗口 */
+/** 显示/聚焦视频窗口（对抗全屏游戏覆盖） */
 function showVideoWindow() {
   if (!videoWindow || videoWindow.isDestroyed()) return;
   if (videoWindow.isMinimized()) videoWindow.restore();
+  // 短暂置顶冲破全屏游戏遮挡
+  videoWindow.setAlwaysOnTop(true);
   videoWindow.show();
   videoWindow.focus();
+  // 200ms 后取消置顶，避免挡住其他正常窗口
+  setTimeout(() => {
+    if (videoWindow && !videoWindow.isDestroyed()) {
+      videoWindow.setAlwaysOnTop(false);
+    }
+  }, 200);
 }
 
 /** 隐藏视频窗口 */
