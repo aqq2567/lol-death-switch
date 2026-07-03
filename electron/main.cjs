@@ -174,18 +174,24 @@ public class LolRecover
     [DllImport("user32.dll")]
     static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
-    static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
-    [DllImport("user32.dll")]
     static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")]
     static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")]
+    static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")]
     static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
     [DllImport("user32.dll")]
     static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")]
+    static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
     const int SW_SHOW = 5;
     const int SW_RESTORE = 9;
+    const byte VK_MENU = 0x12;
+    const uint KEYEVENTF_KEYUP = 0x0002;
 
     public static string Diag(long hwnd)
     {
@@ -198,7 +204,7 @@ public class LolRecover
         GetWindowThreadProcessId(h, out pid);
         string proc = "";
         try { proc = Process.GetProcessById((int)pid).ProcessName; } catch { proc = "?"; }
-        return "hwnd=" + hwnd + " title=\\\"" + title + "\\\" proc=" + proc;
+        return "hwnd=" + hwnd + " title=\\\"" + title + "\\\" proc=" + proc + " minimized=" + IsIconic(h);
     }
 
     public static string DiagFg()
@@ -237,10 +243,17 @@ public class LolRecover
     {
         if (hwnd == 0) return;
         var h = new IntPtr(hwnd);
-        ShowWindow(h, SW_RESTORE);
+
+        if (IsIconic(h))
+        {
+            ShowWindow(h, SW_RESTORE);
+        }
         ShowWindow(h, SW_SHOW);
+        BringWindowToTop(h);
+
+        keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
         SetForegroundWindow(h);
-        SwitchToThisWindow(h, false);
+        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
     }
 }
 `.trim();
