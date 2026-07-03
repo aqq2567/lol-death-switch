@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { exec, execSync } = require('child_process');
 const { LoLMonitor } = require('./lol-monitor.cjs');
+const { CdpClient } = require('./cdp-client.cjs');
 
 /** @type {BrowserWindow|null} */
 let mainWindow = null;
@@ -79,6 +80,15 @@ let savedGameHwnd = null;
 
 /** 浏览器窗口句柄（--new-window 创建后通过快照 diff 追踪） */
 let browserHwnd = null;
+
+/** CDP 客户端（浏览器未运行时可用，提供精准视频状态查询+幂等控制） */
+let cdpClient = null;
+
+/** 当前是否使用 CDP 模式（vs toggle 降级） */
+let cdpMode = false;
+
+/** CDP 调试端口 */
+const CDP_PORT = 9222;
 
 /** 默认浏览器可执行文件路径（启动时从注册表读取并缓存） */
 let defaultBrowserExe = null;
@@ -194,6 +204,22 @@ function findDefaultBrowser() {
 }
 
 /**
+ * 检测默认浏览器是否已在运行（决定能否使用 CDP）
+ * CDP 需要 --remote-debugging-port，该参数仅在浏览器首次启动时生效
+ * @param {string} browserPath
+ * @returns {boolean}
+ */
+function isBrowserRunning(browserPath) {
+  const procName = path.basename(browserPath, '.exe');
+  try {
+    const out = execSync(`tasklist /FI "IMAGENAME eq ${procName}.exe"`, { encoding: 'utf-8', timeout: 3000 });
+    return out.includes(`${procName}.exe`);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 快照当前所有可见浏览器窗口句柄
  * @returns {string[]}
  */
@@ -228,7 +254,9 @@ function startMonitoring() {
   if (lolMonitor) {
     lolMonitor.stop();
   }
-  // 重置浏览器追踪（每次启动监控视为新的游戏会话）
+  // 重置浏览器追踪和 CDP（每次启动监控视为新的游戏会话）
+  if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
+  cdpMode = false;
   browserHwnd = null;
   lolMonitor = new LoLMonitor(config.pollInterval, log);
   lolMonitor.start();
@@ -258,47 +286,95 @@ function startMonitoring() {
     saveStats();
     sendStatsUpdate();
 
-    // 浏览器：--new-window 创建独立窗口（可追踪句柄 + 精准视频控制）
+    // 浏览器：--new-window 创建独立窗口 + CDP/toggle 混合视频控制
     const urls = getTargetUrls();
     if (urls.length > 0) {
       const targetUrl = urls[0];
-      setTimeout(() => {
-        // 已有窗口 → 恢复播放 + 切回
+      setTimeout(async () => {
+        // 已有窗口 → 恢复播放 + 切回浏览器
         if (browserHwnd) {
           const alive = callLolRecover(`IsAlive(${browserHwnd})`);
           if (alive === 'True') {
-            // SendPlay: WM_APPCOMMAND + APPCOMMAND_MEDIA_PLAY (幂等)
-            // 内部调 SetForegroundWindow 自动切回浏览器
-            log('INFO', '[browser] 恢复播放 + 切回: ' + browserHwnd);
-            callLolRecoverAsync(`SendPlay(${browserHwnd})`);
+            if (cdpMode && cdpClient && cdpClient.isConnected) {
+              // CDP：查询状态 → 只在暂停时播放
+              try {
+                const playing = await cdpClient.isVideoPlaying();
+                if (playing === false) {
+                  log('INFO', '[browser] CDP: 暂停中 → 恢复播放');
+                  await cdpClient.playVideo();
+                } else {
+                  log('INFO', '[browser] CDP: 已在播放，仅切回');
+                }
+              } catch {
+                log('WARN', '[browser] CDP 查询失败，WM_APPCOMMAND 降级');
+                callLolRecoverAsync(`SendPlay(${browserHwnd})`);
+              }
+            } else {
+              // 降级：WM_APPCOMMAND toggle
+              log('INFO', '[browser] Toggle 模式: 恢复播放 + 切回: ' + browserHwnd);
+              callLolRecoverAsync(`SendPlay(${browserHwnd})`);
+            }
             return;
           }
           log('INFO', '[browser] 窗口已关闭，重新打开');
+          if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
+          cdpMode = false;
           browserHwnd = null;
         }
 
-        // 首次打开：--new-window 创建独立窗口（窗口=页面，无标签页切换冲突）
+        // 首次打开
         const browserPath = defaultBrowserExe || findDefaultBrowser();
-        if (browserPath) {
-          defaultBrowserExe = browserPath;
-          const before = snapshotBrowsers();
-          exec(`start "" "${browserPath}" --new-window "${targetUrl}"`);
-          log('INFO', '[browser] 启动 --new-window: ' + targetUrl);
-          // 等窗口创建后追踪句柄
-          setTimeout(() => {
-            const hwnd = findNewWindow(before);
-            if (hwnd) {
-              browserHwnd = hwnd;
-              log('INFO', '[browser] 追踪到窗口: ' + hwnd);
-            } else {
-              log('WARN', '[browser] 未能追踪新窗口');
-            }
-          }, 2500);
-        } else {
+        if (!browserPath) {
           log('WARN', '[browser] 未检测到默认浏览器，fallback shell.openExternal');
           shell.openExternal(targetUrl);
           browserHwnd = null;
+          cdpMode = false;
+          return;
         }
+        defaultBrowserExe = browserPath;
+
+        const browserAlreadyRunning = isBrowserRunning(browserPath);
+        const before = snapshotBrowsers();
+
+        if (browserAlreadyRunning) {
+          // 浏览器已在运行 → CDP 不可用 → --new-window + toggle
+          cdpMode = false;
+          exec(`start "" "${browserPath}" --new-window "${targetUrl}"`);
+          log('INFO', '[browser] 浏览器已运行，Toggle 模式: ' + targetUrl);
+        } else {
+          // 浏览器未运行 → --remote-debugging-port → CDP 可用
+          exec(`start "" "${browserPath}" --new-window --remote-debugging-port=${CDP_PORT} "${targetUrl}"`);
+          log('INFO', '[browser] 浏览器未运行，CDP 模式: ' + targetUrl);
+        }
+
+        // 窗口追踪 + CDP 连接
+        setTimeout(async () => {
+          const hwnd = findNewWindow(before);
+          if (hwnd) {
+            browserHwnd = hwnd;
+            log('INFO', '[browser] 追踪到窗口: ' + hwnd);
+          } else {
+            log('WARN', '[browser] 未能追踪新窗口');
+          }
+
+          if (!browserAlreadyRunning && browserHwnd) {
+            // 尝试 CDP 连接（重试 3 次）
+            cdpClient = new CdpClient(log);
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const ok = await cdpClient.connect(CDP_PORT);
+              if (ok) {
+                cdpMode = true;
+                log('INFO', '[browser] CDP 连接成功 (尝试 ' + (attempt + 1) + ')');
+                return;
+              }
+              if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+            }
+            log('WARN', '[browser] CDP 连接失败，降级 Toggle 模式');
+            cdpClient.disconnect();
+            cdpClient = null;
+            cdpMode = false;
+          }
+        }, 2500);
       }, config.delaySeconds * 1000);
     }
   });
@@ -320,13 +396,27 @@ function startMonitoring() {
       sendStatsUpdate();
     }
 
-    // ★ 暂停浏览器视频（幂等 SendPause — 已暂停无效果，不抢焦点）
-    // 窗口 = 页面（无标签页），WM_APPCOMMAND 精准命中
+    // ★ 暂停浏览器视频
     if (browserHwnd) {
       const alive = callLolRecover(`IsAlive(${browserHwnd})`);
       if (alive === 'True') {
-        log('INFO', '[browser] 复活 → 暂停视频: ' + browserHwnd);
-        callLolRecoverAsync(`SendPause(${browserHwnd})`);
+        if (cdpMode && cdpClient && cdpClient.isConnected) {
+          // CDP：查询状态 → 只在播放时暂停（已暂停=跳过，不反悔用户）
+          cdpClient.isVideoPlaying().then(playing => {
+            if (playing === true) {
+              log('INFO', '[browser] CDP: 播放中 → 暂停');
+              cdpClient.pauseVideo();
+            } else {
+              log('INFO', '[browser] CDP: 已暂停或无法确定，跳过');
+            }
+          }).catch(() => {
+            log('WARN', '[browser] CDP 查询失败');
+          });
+        } else {
+          // Toggle 降级
+          log('INFO', '[browser] Toggle 模式: 暂停视频: ' + browserHwnd);
+          callLolRecoverAsync(`SendPause(${browserHwnd})`);
+        }
       }
     }
 
@@ -343,6 +433,8 @@ function stopMonitoring() {
     lolMonitor.stop();
     lolMonitor = null;
   }
+  if (cdpClient) { cdpClient.disconnect(); cdpClient = null; }
+  cdpMode = false;
   browserHwnd = null;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('status-update', {
