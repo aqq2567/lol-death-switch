@@ -328,9 +328,9 @@ function startMonitoring() {
 
           if (useCdp) {
             // Chromium 系：带 --remote-debugging-port 启动，后续用 CDP 精确控制视频
-            // 不加 --user-data-dir，复用用户默认 Profile（合并到现有浏览器窗口，不弹独立任务栏图标）
-            // 若浏览器已在运行则 --remote-debugging-port 可能被忽略，CDP 连接失败时自动降级 SendSpace
-            exec(`start "" "${browserPath}" --new-window --remote-debugging-port=${CDP_PORT} "${targetUrl}"`);
+            const userDataDir = path.join(app.getPath('userData'), 'browser-cdp-profile');
+            if (!fs.existsSync(userDataDir)) fs.mkdirSync(userDataDir, { recursive: true });
+            exec(`start "" "${browserPath}" --new-window --remote-debugging-port=${CDP_PORT} --user-data-dir="${userDataDir}" "${targetUrl}"`);
             log('INFO', '[browser] 启动 Chromium CDP 模式: ' + targetUrl);
           } else {
             // Firefox 等：标准 --new-window，视频控制走 SendSpace 降级
