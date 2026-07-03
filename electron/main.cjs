@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
-const { LoLMonitor } = require('./lol-monitor');
+const { LoLMonitor } = require('./lol-monitor.cjs');
 
 /** @type {BrowserWindow|null} */
 let mainWindow = null;
@@ -27,7 +27,7 @@ function createWindow() {
     title: 'LoL Death Switch',
     // icon: path.join(__dirname, '..', 'assets', 'icon.ico'), // 需要实际.ico文件
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },

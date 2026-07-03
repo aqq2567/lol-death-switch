@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "LoL阵亡后自动跳转抖音/B站的Electron桌面应用",
   "type": "module",
-  "main": "electron/main.js",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
