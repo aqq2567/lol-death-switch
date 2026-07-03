@@ -77,8 +77,11 @@ let afkStartTime = null;
 /** @type {string|null} 阵亡时记录的前台窗口句柄（十进制字符串），复活时用于切回 */
 let savedGameHwnd = null;
 
-/** 浏览器窗口句柄（shell.openExternal 后通过 FindBrowser 追踪，用于窗口切换） */
+/** 浏览器窗口句柄（--new-window 创建后通过快照 diff 追踪） */
 let browserHwnd = null;
+
+/** 默认浏览器可执行文件路径（启动时从注册表读取并缓存） */
+let defaultBrowserExe = null;
 
 /**
  * 获取统计文件路径（%APPDATA%/lol-death-switch/stats.json）
@@ -163,6 +166,61 @@ function sendStatsUpdate() {
 }
 
 /**
+ * 从 Windows 注册表读取默认浏览器可执行文件路径
+ * @returns {string|null}
+ */
+function findDefaultBrowser() {
+  try {
+    const progIdOut = execSync(
+      'reg query "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice" /v ProgId',
+      { encoding: 'utf-8', timeout: 3000 }
+    );
+    const progMatch = progIdOut.match(/ProgId\s+REG_SZ\s+(.+)/);
+    if (!progMatch) return null;
+    const progId = progMatch[1].trim();
+
+    const cmdOut = execSync(
+      `reg query "HKCR\\${progId}\\shell\\open\\command" /ve`,
+      { encoding: 'utf-8', timeout: 3000 }
+    );
+    const cmdMatch = cmdOut.match(/REG_SZ\s+(.+)/);
+    if (!cmdMatch) return null;
+
+    const exeMatch = cmdMatch[1].trim().match(/"([^"]+\.exe)"/i);
+    return exeMatch ? exeMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 快照当前所有可见浏览器窗口句柄
+ * @returns {string[]}
+ */
+function snapshotBrowsers() {
+  try {
+    const raw = callLolRecover('SnapshotBrowsers()');
+    return raw ? raw.split('|').filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 从前后快照中找出新增的窗口句柄
+ * @param {string[]} before
+ * @returns {string|null}
+ */
+function findNewWindow(before) {
+  const after = snapshotBrowsers();
+  const beforeSet = new Set(before);
+  for (const h of after) {
+    if (!beforeSet.has(h)) return h;
+  }
+  return null;
+}
+
+/**
  * 启动 LoL 监控（提取为可复用函数）
  * 供 IPC "start-monitor" 和"挂在后台"两种路径调用
  */
@@ -200,42 +258,52 @@ function startMonitoring() {
     saveStats();
     sendStatsUpdate();
 
-    // 浏览器：通过 shell.openExternal 在默认浏览器中正常打开（不创建新窗口）
+    // 浏览器：--new-window 创建独立窗口（可追踪句柄 + 精准视频控制）
     const urls = getTargetUrls();
     if (urls.length > 0) {
       const targetUrl = urls[0];
       setTimeout(() => {
-        // 已有窗口句柄 → 尝试切回浏览器（不操作视频，避免影响其他标签页）
+        // 已有窗口 → 恢复播放 + 切回
         if (browserHwnd) {
           const alive = callLolRecover(`IsAlive(${browserHwnd})`);
           if (alive === 'True') {
-            log('INFO', '[browser] 切回浏览器窗口: ' + browserHwnd);
-            callLolRecoverAsync(`Restore(${browserHwnd})`);
+            // SendPlay: WM_APPCOMMAND + APPCOMMAND_MEDIA_PLAY (幂等)
+            // 内部调 SetForegroundWindow 自动切回浏览器
+            log('INFO', '[browser] 恢复播放 + 切回: ' + browserHwnd);
+            callLolRecoverAsync(`SendPlay(${browserHwnd})`);
             return;
           }
           log('INFO', '[browser] 窗口已关闭，重新打开');
           browserHwnd = null;
         }
 
-        // 在默认浏览器中正常打开（不 --new-window，不创建独立窗口）
-        shell.openExternal(targetUrl);
-        log('INFO', '[browser] 在默认浏览器中打开: ' + targetUrl);
-
-        // 找到浏览器窗口句柄（用于后续窗口切换）
-        setTimeout(() => {
-          const hwnd = callLolRecover('FindBrowser()');
-          if (hwnd && hwnd !== '0') {
-            browserHwnd = hwnd;
-            log('INFO', '[browser] 追踪到浏览器窗口: ' + hwnd);
-          } else {
-            log('WARN', '[browser] 未能找到浏览器窗口');
-          }
-        }, 2000);
+        // 首次打开：--new-window 创建独立窗口（窗口=页面，无标签页切换冲突）
+        const browserPath = defaultBrowserExe || findDefaultBrowser();
+        if (browserPath) {
+          defaultBrowserExe = browserPath;
+          const before = snapshotBrowsers();
+          exec(`start "" "${browserPath}" --new-window "${targetUrl}"`);
+          log('INFO', '[browser] 启动 --new-window: ' + targetUrl);
+          // 等窗口创建后追踪句柄
+          setTimeout(() => {
+            const hwnd = findNewWindow(before);
+            if (hwnd) {
+              browserHwnd = hwnd;
+              log('INFO', '[browser] 追踪到窗口: ' + hwnd);
+            } else {
+              log('WARN', '[browser] 未能追踪新窗口');
+            }
+          }, 2500);
+        } else {
+          log('WARN', '[browser] 未检测到默认浏览器，fallback shell.openExternal');
+          shell.openExternal(targetUrl);
+          browserHwnd = null;
+        }
       }, config.delaySeconds * 1000);
     }
   });
 
-  // 监听复活事件 — 自动切回LoL窗口 + 统计摸鱼时间
+  // 监听复活事件 — 暂停视频 + 切回 LoL
   lolMonitor.on('revive-event', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('revive-event', {
@@ -252,8 +320,17 @@ function startMonitoring() {
       sendStatsUpdate();
     }
 
-    // 用阵亡时保存的句柄切回游戏窗口
-    // 不操作浏览器视频 — shell.openExternal 打开的标签页无法通过窗口句柄精确定位
+    // ★ 暂停浏览器视频（幂等 SendPause — 已暂停无效果，不抢焦点）
+    // 窗口 = 页面（无标签页），WM_APPCOMMAND 精准命中
+    if (browserHwnd) {
+      const alive = callLolRecover(`IsAlive(${browserHwnd})`);
+      if (alive === 'True') {
+        log('INFO', '[browser] 复活 → 暂停视频: ' + browserHwnd);
+        callLolRecoverAsync(`SendPause(${browserHwnd})`);
+      }
+    }
+
+    // ★ 用阵亡时保存的句柄切回游戏窗口
     restoreGameWindow();
   });
 }
