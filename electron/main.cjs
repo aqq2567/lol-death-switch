@@ -198,7 +198,7 @@ public class LolRecover
         GetWindowThreadProcessId(h, out pid);
         string proc = "";
         try { proc = Process.GetProcessById((int)pid).ProcessName; } catch { proc = "?"; }
-        return "hwnd=" + hwnd + " title=\"" + title + "\" proc=" + proc;
+        return "hwnd=" + hwnd + " title=\\\"" + title + "\\\" proc=" + proc;
     }
 
     public static string DiagFg()
