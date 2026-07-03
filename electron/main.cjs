@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { exec, execSync } = require('child_process');
@@ -192,13 +192,23 @@ function createVideoWindow(url) {
   );
   videoWindow.loadURL(url);
 
-  // 阻止自定义协议跳转（bitbrowser:// / snssdk:// 等）→ Windows 弹"无可用应用"对话框
+  // 阻止自定义协议（bitbrowser:// / snssdk:// 等）→ Windows "无可用应用"对话框
+  // 层1: protocol.handle (app级, 最先拦截)
+  // 层2: will-navigate (顶层导航)
   videoWindow.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('devtools://')) {
       event.preventDefault();
-      log('INFO', '[videoWin] 阻止协议跳转: ' + url);
+      log('INFO', '[videoWin] 阻止导航: ' + url);
     }
   });
+  // 层3: will-redirect (HTTP 302 → 自定义协议)
+  videoWindow.webContents.on('will-redirect', (event, url) => {
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      event.preventDefault();
+      log('INFO', '[videoWin] 阻止重定向: ' + url);
+    }
+  });
+  // 层4: setWindowOpenHandler (window.open / target=_blank)
   videoWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       return { action: 'deny' };
@@ -879,6 +889,16 @@ function setupIPC() {
   });
 }
 
+// ========== 注册自定义协议（阻止 Windows 弹"无可用应用"对话框） ==========
+// 必须在 app.ready 之前注册，让 Chromium 知道这些协议由我们处理
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'bitbrowser', privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
+  { scheme: 'snssdk',     privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
+  { scheme: 'bytedance',  privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
+  { scheme: 'aweme',      privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
+  { scheme: 'douyin',     privileges: { standard: false, secure: false, allowServiceWorkers: false, supportFetchAPI: true } },
+]);
+
 // Electron应用生命周期
 app.whenReady().then(() => {
   initLogger();
@@ -888,6 +908,19 @@ app.whenReady().then(() => {
   setupIPC();
   createWindow();
   createTray();
+
+  // 拦截所有 ByteDance 系自定义协议，返回空响应，杜绝 ShellExecute 弹窗
+  const BLOCKED_SCHEMES = ['bitbrowser', 'snssdk', 'bytedance', 'aweme', 'douyin'];
+  BLOCKED_SCHEMES.forEach(scheme => {
+    try {
+      protocol.handle(scheme, () => {
+        log('INFO', '[protocol] 拦截 ' + scheme + ':// 请求');
+        return new Response(null, { status: 204 });
+      });
+    } catch (err) {
+      log('WARN', '[protocol] 注册 ' + scheme + ' 失败: ' + err.message);
+    }
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
