@@ -8,7 +8,7 @@
 
 /* --- 基础 --- */
 body {
-  background-color: #08080C;
+  background-color: #06060A;
   color: #E8E6E3;
   font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
   margin: 0;
@@ -18,15 +18,21 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* --- 环境背景: 微妙径向光晕 --- */
+/* --- 环境背景: 中心暖光 + 暗角 --- */
 .void-bg {
   position: relative;
-  background: radial-gradient(
-    ellipse 80% 50% at 50% 30%,
-    rgba(200, 155, 60, 0.04) 0%,
-    rgba(200, 155, 60, 0.01) 30%,
-    transparent 70%
-  );
+  background:
+    radial-gradient(
+      ellipse 90% 60% at 50% 40%,
+      rgba(200, 155, 60, 0.05) 0%,
+      rgba(200, 155, 60, 0.02) 35%,
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 60% 40% at 50% 70%,
+      rgba(159, 190, 173, 0.03) 0%,
+      transparent 60%
+    );
 }
 
 .void-bg::before {
@@ -34,8 +40,8 @@ body {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 20% 80%, rgba(170, 190, 224, 0.03) 0%, transparent 50%),
-    radial-gradient(circle at 80% 20%, rgba(159, 190, 173, 0.02) 0%, transparent 50%);
+    radial-gradient(circle at 15% 85%, rgba(170, 190, 224, 0.03) 0%, transparent 45%),
+    radial-gradient(circle at 85% 15%, rgba(159, 190, 173, 0.02) 0%, transparent 45%);
   pointer-events: none;
 }
 
@@ -82,41 +88,6 @@ body {
   animation: revive-pulse 3s ease-in-out infinite;
 }
 
-/* --- 背景能量粒子 (GPU-only: transform) --- */
-@keyframes float-particle {
-  0% {
-    transform: translateY(0) translateX(0) scale(1);
-    opacity: 0;
-  }
-  10% {
-    opacity: 0.6;
-  }
-  90% {
-    opacity: 0.6;
-  }
-  100% {
-    transform: translateY(-120px) translateX(20px) scale(0.3);
-    opacity: 0;
-  }
-}
-
-@keyframes float-particle-2 {
-  0% {
-    transform: translateY(0) translateX(0) scale(1);
-    opacity: 0;
-  }
-  10% {
-    opacity: 0.4;
-  }
-  90% {
-    opacity: 0.4;
-  }
-  100% {
-    transform: translateY(-100px) translateX(-30px) scale(0.2);
-    opacity: 0;
-  }
-}
-
 /* --- 标题微光 --- */
 @keyframes title-shimmer {
   0%, 100% {
@@ -131,16 +102,35 @@ body {
   background: linear-gradient(
     135deg,
     #C89B3C 0%,
-    #D4A84B 25%,
-    #E0C070 50%,
-    #D4A84B 75%,
-    #C89B3C 100%
+    #D4A84B 20%,
+    #E8D080 40%,
+    #D4A84B 60%,
+    #C89B3C 80%,
+    #B8912E 100%
   );
-  background-size: 200% 200%;
+  background-size: 300% 300%;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
-  animation: title-shimmer 4s ease-in-out infinite;
+  animation: title-shimmer 5s ease-in-out infinite;
+}
+
+/* 浅色主题标题 — 暖棕色渐变 */
+.title-shimmer-light {
+  background: linear-gradient(
+    135deg,
+    #B8874A 0%,
+    #C89B5C 20%,
+    #D4A870 40%,
+    #C89B5C 60%,
+    #B8874A 80%,
+    #9A6E35 100%
+  );
+  background-size: 300% 300%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: title-shimmer 5s ease-in-out infinite;
 }
 
 /* --- 状态指示点呼吸 --- */
@@ -173,20 +163,10 @@ body {
   animation: slide-up 350ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* --- 淡入 --- */
-@keyframes fade-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.fade-in {
-  animation: fade-in 400ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
 /* --- 计数跳变 --- */
 @keyframes count-bump {
   0% { transform: scale(1); }
-  40% { transform: scale(1.15); }
+  40% { transform: scale(1.12); }
   100% { transform: scale(1); }
 }
 
@@ -213,9 +193,9 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.12);
 }

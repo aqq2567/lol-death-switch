@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { exec, execSync } = require('child_process');
@@ -10,9 +10,15 @@ let mainWindow = null;
 /** @type {LoLMonitor|null} */
 let lolMonitor = null;
 
-/** @type {{ target: 'douyin'|'bilibili'|'both', pollInterval: number, delaySeconds: number }} */
+/** @type {Tray|null} */
+let tray = null;
+
+/** 是否正在退出（用于区分"彻底关闭"和"隐藏到托盘"） */
+let isQuitting = false;
+
+/** @type {{ target: string, pollInterval: number, delaySeconds: number }} */
 let config = {
-  target: 'douyin',
+  target: 'https://www.douyin.com/?recommend=1',
   pollInterval: 1000,   // 内部轮询间隔，UI不再暴露
   delaySeconds: 0,
 };
@@ -71,6 +77,12 @@ let afkStartTime = null;
 /** @type {string|null} 阵亡时记录的前台窗口句柄（十进制字符串），复活时用于切回 */
 let savedGameHwnd = null;
 
+/** 浏览器窗口句柄（打开后追踪，用于发送空格键和切回） */
+let browserHwnd = null;
+
+/** 默认浏览器可执行文件路径（启动时从注册表读取） */
+let defaultBrowserExe = null;
+
 /**
  * 获取统计文件路径（%APPDATA%/lol-death-switch/stats.json）
  */
@@ -99,6 +111,53 @@ function saveStats() {
   }
 }
 
+// ========== 自定义URL持久化 ==========
+
+/** @type {{label: string, url: string}[]} 用户自定义的跳转目标列表 */
+let customUrls = [];
+
+/**
+ * 获取自定义URL存储路径
+ */
+function getCustomUrlsPath() {
+  return path.join(app.getPath('userData'), 'custom-urls.json');
+}
+
+function loadCustomUrls() {
+  try {
+    const raw = fs.readFileSync(getCustomUrlsPath(), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      // 兼容旧格式 string[] → 自动转换为 {label, url}[]
+      customUrls = parsed.map((item) => {
+        if (typeof item === 'string') return { label: item, url: item };
+        if (item && typeof item.url === 'string') {
+          return { label: item.label || item.url, url: item.url };
+        }
+        return null;
+      }).filter(Boolean);
+      // 保存迁移后的新格式
+      if (parsed.length > 0 && typeof parsed[0] === 'string') {
+        saveCustomUrls();
+      }
+    } else {
+      customUrls = [];
+    }
+  } catch {
+    customUrls = [];
+  }
+}
+
+function saveCustomUrls() {
+  try {
+    const dir = path.dirname(getCustomUrlsPath());
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(getCustomUrlsPath(), JSON.stringify(customUrls, null, 2));
+  } catch (err) {
+    log('ERROR', '[saveCustomUrls] 保存失败: ' + err.message);
+  }
+}
+
 /** 推送统计更新到渲染进程 */
 function sendStatsUpdate() {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -107,16 +166,274 @@ function sendStatsUpdate() {
 }
 
 /**
+ * 从 Windows 注册表读取默认浏览器可执行文件路径
+ * HKCU\...\UrlAssociations\http\UserChoice → ProgId → HKCR\<ProgId>\shell\open\command
+ * @returns {string|null}
+ */
+function findDefaultBrowser() {
+  try {
+    // 第一步：查询 HTTP 协议的默认处理程序 ProgId
+    const progIdOut = execSync(
+      'reg query "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice" /v ProgId',
+      { encoding: 'utf-8', timeout: 3000 }
+    );
+    const progMatch = progIdOut.match(/ProgId\s+REG_SZ\s+(.+)/);
+    if (!progMatch) return null;
+    const progId = progMatch[1].trim();
+
+    // 第二步：查询该 ProgId 的 shell open 命令
+    const cmdOut = execSync(
+      `reg query "HKCR\\${progId}\\shell\\open\\command" /ve`,
+      { encoding: 'utf-8', timeout: 3000 }
+    );
+    const cmdMatch = cmdOut.match(/REG_SZ\s+(.+)/);
+    if (!cmdMatch) return null;
+
+    // 提取 exe 路径（去掉引号和参数）
+    let raw = cmdMatch[1].trim();
+    // 格式通常是: "C:\...\browser.exe" ... 或 "C:\...\browser.exe" --single-argument %1
+    const exeMatch = raw.match(/"([^"]+\.exe)"/i);
+    return exeMatch ? exeMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 快照当前所有可见浏览器窗口句柄（管道分隔）
+ * 覆盖 Chrome / Edge / Firefox / Brave
+ * @returns {string[]}
+ */
+function snapshotBrowsers() {
+  try {
+    const raw = callLolRecover('SnapshotBrowsers()');
+    return raw ? raw.split('|').filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 从前后快照中找出新增的窗口句柄
+ * @param {string[]} before
+ * @returns {string|null}
+ */
+function findNewWindow(before) {
+  const after = snapshotBrowsers();
+  const beforeSet = new Set(before);
+  for (const h of after) {
+    if (!beforeSet.has(h)) return h;
+  }
+  return null;
+}
+
+/**
+ * 启动 LoL 监控（提取为可复用函数）
+ * 供 IPC "start-monitor" 和"挂在后台"两种路径调用
+ */
+function startMonitoring() {
+  if (lolMonitor) {
+    lolMonitor.stop();
+  }
+  // 重置浏览器追踪（每次启动监控视为新的游戏会话）
+  browserHwnd = null;
+  lolMonitor = new LoLMonitor(config.pollInterval, log);
+  lolMonitor.start();
+
+  // 监听状态更新事件
+  lolMonitor.on('status-update', (status) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('status-update', status);
+    }
+  });
+
+  // 监听阵亡事件
+  lolMonitor.on('death-event', () => {
+    // ★ 先保存对局窗口句柄（必须在浏览器抢焦点之前）
+    saveGameWindow();
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('death-event', {
+        timestamp: Date.now(),
+        deathCount: lolMonitor.getDeathCount(),
+      });
+    }
+
+    // 更新持久化统计：累计阵亡 +1，记录AFK起始时间
+    stats.totalDeaths += 1;
+    afkStartTime = Date.now();
+    saveStats();
+    sendStatsUpdate();
+
+    // 浏览器：首次用 chrome --new-window 打开，后续切回 + 发送空格恢复播放
+    const urls = getTargetUrls();
+    if (urls.length > 0) {
+      const targetUrl = urls[0];
+      setTimeout(() => {
+        // 已有窗口句柄 → 先发空格恢复播放，再切回
+        if (browserHwnd) {
+          const alive = callLolRecover(`IsAlive(${browserHwnd})`);
+          if (alive === 'True') {
+            log('INFO', '[browser] 发送空格恢复播放 + 切回: ' + browserHwnd);
+            callLolRecoverAsync(`SendSpace(${browserHwnd})`);
+            return; // SendSpace 内部会 SetForegroundWindow，不需要额外切回
+          }
+          log('INFO', '[browser] 窗口已关闭，重新打开');
+          browserHwnd = null;
+        }
+
+        // 首次打开：用默认浏览器 --new-window 创建独立窗口以便追踪句柄
+        const browserPath = defaultBrowserExe || findDefaultBrowser();
+        if (browserPath) {
+          defaultBrowserExe = browserPath;
+          const before = snapshotBrowsers();
+          exec(`start "" "${browserPath}" --new-window "${targetUrl}"`);
+          log('INFO', '[browser] 启动默认浏览器 --new-window: ' + targetUrl);
+          // 等浏览器窗口创建后，找到新句柄
+          setTimeout(() => {
+            const hwnd = findNewWindow(before);
+            if (hwnd) {
+              browserHwnd = hwnd;
+              log('INFO', '[browser] 追踪到窗口: ' + hwnd);
+            } else {
+              log('WARN', '[browser] 未能追踪新窗口');
+            }
+          }, 2500);
+        } else {
+          // 找不到默认浏览器，回退到 shell.openExternal（无法追踪句柄）
+          log('WARN', '[browser] 未能检测默认浏览器，使用 shell.openExternal');
+          shell.openExternal(targetUrl);
+          browserHwnd = null;
+        }
+      }, config.delaySeconds * 1000);
+    }
+  });
+
+  // 监听复活事件 — 自动切回LoL窗口 + 统计摸鱼时间
+  lolMonitor.on('revive-event', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('revive-event', {
+        timestamp: Date.now(),
+      });
+    }
+
+    // 计算本次AFK时长并累加
+    if (afkStartTime) {
+      const afkDuration = Date.now() - afkStartTime;
+      stats.totalAfkMs += afkDuration;
+      afkStartTime = null;
+      saveStats();
+      sendStatsUpdate();
+    }
+
+    // ★ 暂停浏览器中的视频（向追踪到的窗口发送空格键）
+    if (browserHwnd) {
+      const alive = callLolRecover(`IsAlive(${browserHwnd})`);
+      if (alive === 'True') {
+        log('INFO', '[browser] 复活 → 暂停视频: ' + browserHwnd);
+        callLolRecover(`SendSpace(${browserHwnd})`, 2000);
+      }
+    }
+
+    // ★ 用阵亡时保存的句柄切回游戏窗口
+    restoreGameWindow();
+  });
+}
+
+/**
+ * 停止 LoL 监控
+ */
+function stopMonitoring() {
+  if (lolMonitor) {
+    lolMonitor.stop();
+    lolMonitor = null;
+  }
+  browserHwnd = null;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('status-update', {
+      state: 'idle',
+      message: '监控已停止',
+    });
+  }
+}
+
+/**
+ * 获取托盘图标（从 PNG 加载并缩放到 16×16）
+ */
+function createTrayIcon() {
+  const iconPath = path.join(__dirname, '..', 'assets', 'icon.png');
+  return nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+}
+
+/**
+ * 创建系统托盘
+ */
+function createTray() {
+  if (tray) return;
+
+  tray = new Tray(createTrayIcon());
+  tray.setToolTip('死了就摸鱼吧');
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '显示窗口',
+      click: () => {
+        if (mainWindow) {
+          if (mainWindow.isDestroyed()) {
+            createWindow();
+          } else {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+        }
+      },
+    },
+    { type: 'separator' },
+    {
+      label: '退出',
+      click: () => {
+        isQuitting = true;
+        stopMonitoring();
+        if (tray) {
+          tray.destroy();
+          tray = null;
+        }
+        app.quit();
+      },
+    },
+  ]);
+
+  tray.setContextMenu(contextMenu);
+
+  // 双击托盘图标 → 显示窗口
+  tray.on('double-click', () => {
+    if (mainWindow) {
+      if (mainWindow.isDestroyed()) {
+        createWindow();
+      } else {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    }
+  });
+}
+
+/**
  * 创建主窗口
  */
 function createWindow() {
+  // 设计宽高比 480:640 = 3:4，锁死防止布局变形
+  const DESIGN_RATIO = 480 / 640; // 0.75
+
   mainWindow = new BrowserWindow({
     width: 480,
     height: 640,
-    minWidth: 400,
-    minHeight: 500,
-    title: 'LoL Death Switch',
-    // icon: path.join(__dirname, '..', 'assets', 'icon.ico'), // 需要实际.ico文件
+    minWidth: 360,
+    minHeight: 480,
+    maxWidth: 660,
+    maxHeight: 880,
+    title: '死了就摸鱼吧',
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -126,6 +443,9 @@ function createWindow() {
     autoHideMenuBar: true,
     resizable: true,
   });
+
+  // 锁定宽高比 — 无论怎么拖拽，始终保持 3:4 比例
+  mainWindow.setAspectRatio(DESIGN_RATIO);
 
   // 开发模式加载Vite服务器，生产模式加载构建产物
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -140,6 +460,16 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // 截获关闭按钮 → 通知渲染进程弹出自定义对话框
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return; // 真正退出时不拦截
+
+    event.preventDefault();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('request-close-choice');
+    }
+  });
 }
 
 /**
@@ -147,14 +477,7 @@ function createWindow() {
  * @returns {string[]}
  */
 function getTargetUrls() {
-  const urls = [];
-  if (config.target === 'douyin' || config.target === 'both') {
-    urls.push('https://www.douyin.com');
-  }
-  if (config.target === 'bilibili' || config.target === 'both') {
-    urls.push('https://www.bilibili.com');
-  }
-  return urls;
+  return config.target ? [config.target] : [];
 }
 
 // ========== 前台窗口保存/复原（阵亡→自动切出 → 复活→自动切回） ==========
@@ -255,6 +578,105 @@ public class LolRecover
         SetForegroundWindow(h);
         keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
     }
+
+    [DllImport("user32.dll")]
+    static extern bool IsWindow(IntPtr hWnd);
+
+    /// <summary>
+    /// 检测窗口句柄是否仍然有效
+    /// </summary>
+    public static bool IsAlive(long hwnd)
+    {
+        if (hwnd == 0) return false;
+        return IsWindow(new IntPtr(hwnd));
+    }
+
+    /// <summary>
+    /// 快照当前所有可见浏览器窗口句柄（管道分隔）
+    /// 进程名匹配: chrome, msedge, firefox, brave
+    /// </summary>
+    public static string SnapshotBrowsers()
+    {
+        var names = new[] { "chrome", "msedge", "firefox", "brave" };
+        var list = new System.Collections.Generic.List<string>();
+        foreach (var name in names)
+        {
+            try
+            {
+                var procs = Process.GetProcessesByName(name);
+                foreach (var p in procs)
+                {
+                    try
+                    {
+                        var h = p.MainWindowHandle;
+                        if (h != IntPtr.Zero)
+                        {
+                            var sb = new StringBuilder(256);
+                            GetWindowText(h, sb, 256);
+                            if (sb.Length > 0)
+                                list.Add(h.ToInt64().ToString());
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+        return string.Join("|", list);
+    }
+
+    /// <summary>
+    /// 查找任意可见浏览器窗口，返回其句柄
+    /// </summary>
+    public static long FindBrowser()
+    {
+        var names = new[] { "chrome", "msedge", "firefox", "brave" };
+        foreach (var name in names)
+        {
+            try
+            {
+                var procs = Process.GetProcessesByName(name);
+                foreach (var p in procs)
+                {
+                    try
+                    {
+                        var h = p.MainWindowHandle;
+                        if (h != IntPtr.Zero)
+                        {
+                            var sb = new StringBuilder(256);
+                            GetWindowText(h, sb, 256);
+                            if (sb.Length > 0) return h.ToInt64();
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// 向指定窗口发送空格键（通用播放/暂停快捷键）
+    /// </summary>
+    [DllImport("user32.dll")]
+    static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    const uint WM_KEYDOWN = 0x0100;
+    const uint WM_KEYUP = 0x0101;
+    const int VK_SPACE = 0x20;
+
+    public static void SendSpace(long hwnd)
+    {
+        if (hwnd == 0) return;
+        var h = new IntPtr(hwnd);
+        // 先聚焦窗口（否则 PostMessage 可能被忽略）
+        SetForegroundWindow(h);
+        System.Threading.Thread.Sleep(50);
+        PostMessage(h, WM_KEYDOWN, (IntPtr)VK_SPACE, (IntPtr)1);
+        PostMessage(h, WM_KEYUP, (IntPtr)VK_SPACE, (IntPtr)0xC0000001);
+    }
+
+    }
 }
 `.trim();
 
@@ -281,16 +703,16 @@ function initLolRecover() {
 
 /**
  * 执行 PowerShell 方法调用并返回 stdout
- * LolRecover 类已在 initLolRecover() 中加载，此处只需调用静态方法
+ * 每次调用都是独立 PowerShell 进程，所以必须先 Add-Type 加载 C# 类
  */
 function callLolRecover(methodCall, timeout = 5000) {
-  const psScript = `[LolRecover]::${methodCall}`;
+  const psScript = `Add-Type -Path '${lolCsPath}'; [LolRecover]::${methodCall}`;
   const cmd = `powershell -NoProfile -EncodedCommand ${Buffer.from(psScript, 'utf16le').toString('base64')}`;
   return execSync(cmd, { encoding: 'utf-8', timeout }).trim();
 }
 
 function callLolRecoverAsync(methodCall, callback) {
-  const psScript = `[LolRecover]::${methodCall}`;
+  const psScript = `Add-Type -Path '${lolCsPath}'; [LolRecover]::${methodCall}`;
   const cmd = `powershell -NoProfile -EncodedCommand ${Buffer.from(psScript, 'utf16le').toString('base64')}`;
   exec(cmd, (err, stdout) => {
     if (callback) callback(err, stdout ? stdout.trim() : '');
@@ -369,84 +791,13 @@ function restoreGameWindow() {
 function setupIPC() {
   // 启动监控
   ipcMain.handle('start-monitor', () => {
-    if (lolMonitor) {
-      lolMonitor.stop();
-    }
-    lolMonitor = new LoLMonitor(config.pollInterval, log);
-    lolMonitor.start();
-
-    // 监听状态更新事件
-    lolMonitor.on('status-update', (status) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('status-update', status);
-      }
-    });
-
-    // 监听阵亡事件
-    lolMonitor.on('death-event', () => {
-      // ★ 先保存对局窗口句柄（必须在浏览器抢焦点之前）
-      saveGameWindow();
-
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('death-event', {
-          timestamp: Date.now(),
-          deathCount: lolMonitor.getDeathCount(),
-        });
-      }
-
-      // 更新持久化统计：累计阵亡 +1，记录AFK起始时间
-      stats.totalDeaths += 1;
-      afkStartTime = Date.now();
-      saveStats();
-      sendStatsUpdate();
-
-      // 延迟跳转浏览器
-      const urls = getTargetUrls();
-      if (urls.length > 0) {
-        setTimeout(() => {
-          urls.forEach((url) => {
-            shell.openExternal(url);
-          });
-        }, config.delaySeconds * 1000);
-      }
-    });
-
-    // 监听复活事件 — 自动切回LoL窗口 + 统计摸鱼时间
-    lolMonitor.on('revive-event', () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('revive-event', {
-          timestamp: Date.now(),
-        });
-      }
-
-      // 计算本次AFK时长并累加
-      if (afkStartTime) {
-        const afkDuration = Date.now() - afkStartTime;
-        stats.totalAfkMs += afkDuration;
-        afkStartTime = null;
-        saveStats();
-        sendStatsUpdate();
-      }
-
-      // ★ 用阵亡时保存的句柄切回游戏窗口
-      restoreGameWindow();
-    });
-
+    startMonitoring();
     return { success: true };
   });
 
   // 停止监控
   ipcMain.handle('stop-monitor', () => {
-    if (lolMonitor) {
-      lolMonitor.stop();
-      lolMonitor = null;
-    }
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('status-update', {
-        state: 'idle',
-        message: '监控已停止',
-      });
-    }
+    stopMonitoring();
     return { success: true };
   });
 
@@ -491,6 +842,68 @@ function setupIPC() {
     sendStatsUpdate();
     return { ...stats };
   });
+
+  // 获取自定义URL列表
+  ipcMain.handle('get-custom-urls', () => {
+    return [...customUrls];
+  });
+
+  // 添加自定义URL
+  ipcMain.handle('add-custom-url', (event, item) => {
+    const label = (item?.label || '').trim();
+    const url = (item?.url || '').trim();
+    if (!label || !url) return [...customUrls];
+    if (!/^https?:\/\/.+/.test(url)) return [...customUrls];
+    // 按url去重
+    if (!customUrls.some((c) => c.url === url)) {
+      customUrls.push({ label, url });
+      saveCustomUrls();
+    }
+    return [...customUrls];
+  });
+
+  // 删除自定义URL (按url匹配)
+  ipcMain.handle('delete-custom-url', (event, url) => {
+    customUrls = customUrls.filter((c) => c.url !== url);
+    saveCustomUrls();
+    return [...customUrls];
+  });
+
+  // 设置当前跳转目标URL
+  ipcMain.handle('set-target-url', (event, url) => {
+    config.target = url;
+    return config.target;
+  });
+
+  // 关闭对话框选择回传（渲染进程自定义对话框）
+  ipcMain.handle('resolve-close-choice', (event, choice) => {
+    if (choice === 'quit') {
+      isQuitting = true;
+      stopMonitoring();
+      if (tray) {
+        tray.destroy();
+        tray = null;
+      }
+      app.quit();
+    } else if (choice === 'tray') {
+      if (!lolMonitor) {
+        startMonitoring();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('status-update', {
+            state: 'searching',
+            message: '正在寻找游戏客户端...',
+            isDead: false,
+            deathCount: 0,
+          });
+        }
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.hide();
+      }
+    }
+    // 'cancel' → 什么都不做
+    return { success: true };
+  });
 }
 
 // Electron应用生命周期
@@ -498,8 +911,10 @@ app.whenReady().then(() => {
   initLogger();
   initLolRecover();
   loadStats();
+  loadCustomUrls();
   setupIPC();
   createWindow();
+  createTray();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -509,17 +924,14 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  // Windows 上不退出，因为还有托盘图标
   if (process.platform !== 'darwin') {
-    // 停止监控
-    if (lolMonitor) {
-      lolMonitor.stop();
-      lolMonitor = null;
-    }
-    app.quit();
+    // 不调用 app.quit()，保持托盘运行
   }
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   // 如果退出时玩家还在阵亡中，将未完成的AFK时间计入统计
   if (afkStartTime) {
     const afkDuration = Date.now() - afkStartTime;
@@ -527,8 +939,9 @@ app.on('before-quit', () => {
     afkStartTime = null;
     saveStats();
   }
-  if (lolMonitor) {
-    lolMonitor.stop();
-    lolMonitor = null;
+  stopMonitoring();
+  if (tray) {
+    tray.destroy();
+    tray = null;
   }
 });

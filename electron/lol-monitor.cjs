@@ -165,10 +165,12 @@ class LoLMonitor extends EventEmitter {
         });
       }
     } catch (error) {
-      this.failureCount += 1;
-      this._log('WARN', `[LoLMonitor] API轮询失败 (${this.failureCount}/${this.maxFailures}): ${error.message}`);
+      // 超过阈值后静默轮询，不刷日志，等待游戏恢复
+      if (this.failureCount < this.maxFailures) {
+        this.failureCount += 1;
+        this._log('WARN', `[LoLMonitor] API轮询失败 (${this.failureCount}/${this.maxFailures}): ${error.message}`);
+      }
 
-      // 连续多次失败，认为游戏客户端不在运行
       if (this.failureCount >= this.maxFailures) {
         this.emit('status-update', {
           state: 'no-game',

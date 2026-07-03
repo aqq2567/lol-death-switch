@@ -79,4 +79,49 @@ contextBridge.exposeInMainWorld('lolAPI', {
     ipcRenderer.on('stats-update', handler);
     return () => ipcRenderer.removeListener('stats-update', handler);
   },
+
+  /**
+   * 获取用户自定义URL列表
+   * @returns {Promise<{label: string, url: string}[]>}
+   */
+  getCustomUrls: () => ipcRenderer.invoke('get-custom-urls'),
+
+  /**
+   * 添加自定义URL
+   * @param {{label: string, url: string}} item
+   * @returns {Promise<{label: string, url: string}[]>}
+   */
+  addCustomUrl: (item) => ipcRenderer.invoke('add-custom-url', item),
+
+  /**
+   * 删除自定义URL
+   * @param {string} url
+   * @returns {Promise<string[]>}
+   */
+  deleteCustomUrl: (url) => ipcRenderer.invoke('delete-custom-url', url),
+
+  /**
+   * 设置当前跳转目标URL
+   * @param {string} url
+   * @returns {Promise<string>}
+   */
+  setTargetUrl: (url) => ipcRenderer.invoke('set-target-url', url),
+
+  /**
+   * 监听关闭请求（用户点击窗口 ✕ 时触发）
+   * @param {Function} callback
+   * @returns {Function} 清理函数
+   */
+  onCloseRequest: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('request-close-choice', handler);
+    return () => ipcRenderer.removeListener('request-close-choice', handler);
+  },
+
+  /**
+   * 回传关闭对话框选择
+   * @param {'quit'|'tray'|'cancel'} choice
+   * @returns {Promise<{success: boolean}>}
+   */
+  resolveCloseChoice: (choice) => ipcRenderer.invoke('resolve-close-choice', choice),
 });
