@@ -271,33 +271,19 @@ async function isVideoPlaying() {
   }
 }
 
-/**
- * 获取视频窗口的原生 HWND（传给 C# Restore 用）
- */
-function getVideoWindowHwnd() {
-  if (!videoWindow || videoWindow.isDestroyed()) return null;
-  const buf = videoWindow.getNativeWindowHandle();
-  if (!buf) return null;
-  // 64 位 Windows → 8 字节，32 位 → 4 字节
-  if (buf.length >= 8) return buf.readBigUInt64LE(0).toString();
-  return buf.readUInt32LE(0).toString();
-}
-
-/** 显示/聚焦视频窗口（复用 C# Restore 突破全屏游戏） */
+/** 显示/聚焦视频窗口（Electron 原生 API，无 PowerShell 开销） */
 function showVideoWindow() {
   if (!videoWindow || videoWindow.isDestroyed()) return;
   if (videoWindow.isMinimized()) videoWindow.restore();
+  // 短暂置顶突破全屏游戏遮挡，300ms 后复原
+  videoWindow.setAlwaysOnTop(true, 'screen-saver');
   videoWindow.show();
-
-  // 复用已有的 C# Restore（Alt + SetForegroundWindow）切到前台
-  const hwnd = getVideoWindowHwnd();
-  if (hwnd) {
-    log('INFO', '[videoWin] 切到前台: ' + hwnd);
-    callLolRecoverAsync(`Restore(${hwnd})`, (err) => {
-      if (err) log('WARN', '[videoWin] Restore 失败: ' + err.message);
-      else log('INFO', '[videoWin] 已切到前台');
-    });
-  }
+  videoWindow.focus();
+  setTimeout(() => {
+    if (videoWindow && !videoWindow.isDestroyed()) {
+      videoWindow.setAlwaysOnTop(false);
+    }
+  }, 300);
 }
 
 /** 隐藏视频窗口 */
@@ -354,8 +340,9 @@ function startMonitoring() {
     if (urls.length > 0) {
       const targetUrl = urls[0];
       setTimeout(async () => {
-        // 窗口已存在 → 恢复播放 + 显示
+        // 窗口已存在 → 先切窗口，再恢复播放（杜绝声音比画面先到）
         if (videoWindow && !videoWindow.isDestroyed()) {
+          showVideoWindow();
           const playing = await isVideoPlaying();
           if (!playing) {
             log('INFO', '[videoWin] 暂停中 → 恢复播放');
@@ -363,7 +350,6 @@ function startMonitoring() {
           } else {
             log('INFO', '[videoWin] 已在播放，仅显示');
           }
-          showVideoWindow();
           return;
         }
 
