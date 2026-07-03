@@ -675,8 +675,6 @@ public class LolRecover
         PostMessage(h, WM_KEYDOWN, (IntPtr)VK_SPACE, (IntPtr)1);
         PostMessage(h, WM_KEYUP, (IntPtr)VK_SPACE, (IntPtr)0xC0000001);
     }
-
-    }
 }
 `.trim();
 
