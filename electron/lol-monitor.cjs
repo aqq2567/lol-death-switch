@@ -101,7 +101,10 @@ class LoLMonitor extends EventEmitter {
 
       // 提取当前活跃玩家名称
       if (data && data.activePlayer && data.activePlayer.summonerName) {
-        this.activePlayerName = data.activePlayer.summonerName;
+        if (this.activePlayerName !== data.activePlayer.summonerName) {
+          console.log('[LoLMonitor] 玩家:', data.activePlayer.summonerName);
+          this.activePlayerName = data.activePlayer.summonerName;
+        }
       }
 
       // 检测玩家阵亡状态
@@ -111,6 +114,7 @@ class LoLMonitor extends EventEmitter {
         // 新阵亡事件触发
         this.wasDead = true;
         this.deathCount += 1;
+        console.log(`[LoLMonitor] 💀 阵亡检测 #${this.deathCount} | health=${this._getHealth(data)} isDead=${isDead}`);
 
         this.emit('status-update', {
           state: 'dead',
@@ -129,8 +133,9 @@ class LoLMonitor extends EventEmitter {
           isDead: true,
         });
       } else if (!isDead && this.wasDead) {
-        // 复活！重置阵亡状态
+        // 复活！重置阵亡状态，触发切回事件
         this.wasDead = false;
+        console.log(`[LoLMonitor] ✨ 复活检测 | health=${this._getHealth(data)}`);
 
         this.emit('status-update', {
           state: 'alive',
@@ -138,6 +143,9 @@ class LoLMonitor extends EventEmitter {
           deathCount: this.deathCount,
           isDead: false,
         });
+
+        // 通知主进程切换回LoL窗口
+        this.emit('revive-event');
       } else {
         // 正常存活状态
         this.emit('status-update', {
@@ -149,6 +157,7 @@ class LoLMonitor extends EventEmitter {
       }
     } catch (error) {
       this.failureCount += 1;
+      console.log(`[LoLMonitor] API轮询失败 (${this.failureCount}/${this.maxFailures}): ${error.message}`);
 
       // 连续多次失败，认为游戏客户端不在运行
       if (this.failureCount >= this.maxFailures) {
@@ -163,6 +172,21 @@ class LoLMonitor extends EventEmitter {
         });
       }
     }
+  }
+
+  /**
+   * 获取当前血量（用于日志）
+   * @param {Object} data
+   * @returns {string}
+   * @private
+   */
+  _getHealth(data) {
+    try {
+      if (data && data.activePlayer && data.activePlayer.championStats) {
+        return data.activePlayer.championStats.currentHealth || '?';
+      }
+    } catch {}
+    return '?';
   }
 
   /**

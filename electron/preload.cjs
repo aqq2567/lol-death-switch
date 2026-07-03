@@ -36,6 +36,18 @@ contextBridge.exposeInMainWorld('lolAPI', {
   getDeathCount: () => ipcRenderer.invoke('get-death-count'),
 
   /**
+   * 获取持久化统计（累计阵亡 + 累计摸鱼时间）
+   * @returns {Promise<{totalDeaths: number, totalAfkMs: number}>}
+   */
+  getStats: () => ipcRenderer.invoke('get-stats'),
+
+  /**
+   * 重置持久化统计
+   * @returns {Promise<{totalDeaths: number, totalAfkMs: number}>}
+   */
+  resetStats: () => ipcRenderer.invoke('reset-stats'),
+
+  /**
    * 监听状态更新事件
    * @param {Function} callback - 回调函数，接收status对象
    * @returns {Function} 清理函数，移除监听器
@@ -55,5 +67,16 @@ contextBridge.exposeInMainWorld('lolAPI', {
     const handler = (event, deathEvent) => callback(deathEvent);
     ipcRenderer.on('death-event', handler);
     return () => ipcRenderer.removeListener('death-event', handler);
+  },
+
+  /**
+   * 监听持久化统计更新
+   * @param {Function} callback - 回调函数，接收 {totalDeaths, totalAfkMs}
+   * @returns {Function} 清理函数，移除监听器
+   */
+  onStatsUpdate: (callback) => {
+    const handler = (event, stats) => callback(stats);
+    ipcRenderer.on('stats-update', handler);
+    return () => ipcRenderer.removeListener('stats-update', handler);
   },
 });

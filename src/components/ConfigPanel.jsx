@@ -4,28 +4,21 @@ import { Box, Typography, Slider, IconButton } from '@mui/material';
 /**
  * 配置面板 — 底部滑出式
  *
- * 跳转目标、轮询间隔、阵亡延迟。
+ * 跳转目标、阵亡延迟。
  * onClose 由父组件控制面板关闭。
  */
 function ConfigPanel({ config, onConfigChange, isMonitoring, onClose }) {
   const [target, setTarget] = useState(config.target);
-  const [pollIntervalSec, setPollIntervalSec] = useState(config.pollInterval / 1000);
   const [delaySeconds, setDelaySeconds] = useState(config.delaySeconds);
 
   useEffect(() => {
     setTarget(config.target);
-    setPollIntervalSec(config.pollInterval / 1000);
     setDelaySeconds(config.delaySeconds);
   }, [config]);
 
   const handleTargetChange = (newTarget) => {
     setTarget(newTarget);
     onConfigChange({ target: newTarget });
-  };
-
-  const handlePollIntervalChange = (value) => {
-    setPollIntervalSec(value);
-    onConfigChange({ pollInterval: value * 1000 });
   };
 
   const handleDelayChange = (value) => {
@@ -173,60 +166,7 @@ function ConfigPanel({ config, onConfigChange, isMonitoring, onClose }) {
         </Box>
       </Box>
 
-      {/* ---- 轮询间隔 ---- */}
-      <Box sx={{ mb: 3 }}>
-        <Box
-          sx={{
-            display: 'flex',
-            alignItems: 'baseline',
-            justifyContent: 'space-between',
-            mb: 1,
-          }}
-        >
-          <Typography
-            variant="caption"
-            sx={{
-              color: '#989691',
-              fontWeight: 600,
-              letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-            }}
-          >
-            轮询间隔
-          </Typography>
-          <Typography
-            sx={{
-              fontSize: '0.85rem',
-              fontWeight: 600,
-              color: '#C89B3C',
-              fontVariantNumeric: 'tabular-nums',
-            }}
-          >
-            {pollIntervalSec}s
-          </Typography>
-        </Box>
-        <Slider
-          value={pollIntervalSec}
-          onChange={(_, v) => handlePollIntervalChange(v)}
-          min={1}
-          max={10}
-          step={0.5}
-          valueLabelDisplay="auto"
-          valueLabelFormat={(v) => `${v}s`}
-        />
-        <Box
-          sx={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            mt: 0.5,
-          }}
-        >
-          <Typography variant="caption" sx={{ color: '#5B5855' }}>1s</Typography>
-          <Typography variant="caption" sx={{ color: '#5B5855' }}>10s</Typography>
-        </Box>
-      </Box>
-
-      {/* ---- 阵亡延迟 ---- */}
+      {/* ---- 阵亡延迟跳转 ---- */}
       <Box>
         <Box
           sx={{
@@ -255,17 +195,17 @@ function ConfigPanel({ config, onConfigChange, isMonitoring, onClose }) {
               fontVariantNumeric: 'tabular-nums',
             }}
           >
-            {delaySeconds === 0 ? '立即' : `${delaySeconds}s`}
+            {delaySeconds === 0 ? '立即' : `${delaySeconds.toFixed(1)}s`}
           </Typography>
         </Box>
         <Slider
           value={delaySeconds}
           onChange={(_, v) => handleDelayChange(v)}
           min={0}
-          max={15}
-          step={1}
+          max={1}
+          step={0.2}
           valueLabelDisplay="auto"
-          valueLabelFormat={(v) => (v === 0 ? '立即' : `${v}s`)}
+          valueLabelFormat={(v) => (v === 0 ? '立即' : `${v.toFixed(1)}s`)}
           sx={{
             '& .MuiSlider-track': { bgcolor: '#9FBEAD' },
             '& .MuiSlider-thumb': {
@@ -285,7 +225,7 @@ function ConfigPanel({ config, onConfigChange, isMonitoring, onClose }) {
           }}
         >
           <Typography variant="caption" sx={{ color: '#5B5855' }}>立即</Typography>
-          <Typography variant="caption" sx={{ color: '#5B5855' }}>15s</Typography>
+          <Typography variant="caption" sx={{ color: '#5B5855' }}>1s</Typography>
         </Box>
         <Typography variant="caption" sx={{ color: '#5B5855', mt: 1, display: 'block' }}>
           阵亡后等待指定时间再跳转，给你一点反应缓冲

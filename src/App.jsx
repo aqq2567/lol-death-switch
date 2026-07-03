@@ -3,15 +3,15 @@ import { ThemeProvider, CssBaseline, Box } from '@mui/material';
 import voidRiftTheme from './theme';
 import StatusPanel from './components/StatusPanel';
 import ConfigPanel from './components/ConfigPanel';
-import DeathCounter from './components/DeathCounter';
+import StatsPanel from './components/StatsPanel';
 
 /**
- * Void Rift — LoL阵亡监控
+ * 今天摸鱼了吗 — LoL阵亡监控
  *
- * 布局: 全屏不滚动
- *   顶部 → 状态栏 [连接指示 · 游戏状态 · 阵亡次数摘要]
- *   中部 → 阵亡计数器 [视觉焦点，占据主要空间]
- *   底部 → 操作栏 [启动/停止 · 配置入口 → 滑出面板]
+ * 布局:
+ *   顶部 → 品牌 + 横向状态指示
+ *   中部 → 双卡片：累计阵亡 | 替你摸鱼的时间
+ *   底部 → 启停按钮 + 配置入口
  */
 function App() {
   const [isMonitoring, setIsMonitoring] = useState(false);
@@ -26,11 +26,11 @@ function App() {
 
   const [config, setConfig] = useState({
     target: 'douyin',
-    pollInterval: 3000,
-    delaySeconds: 2,
+    delaySeconds: 0,
   });
 
-  const [deathCount, setDeathCount] = useState(0);
+  // 持久化统计：累计阵亡 + 累计摸鱼时间
+  const [stats, setStats] = useState({ totalDeaths: 0, totalAfkMs: 0 });
 
   const handleStart = useCallback(async () => {
     try {
@@ -42,7 +42,6 @@ function App() {
         isDead: false,
         deathCount: 0,
       });
-      setDeathCount(0);
     } catch (err) {
       console.error('启动监控失败:', err);
     }
@@ -56,12 +55,12 @@ function App() {
         state: 'idle',
         message: '监控已停止',
         isDead: false,
-        deathCount: deathCount,
+        deathCount: 0,
       });
     } catch (err) {
       console.error('停止监控失败:', err);
     }
-  }, [deathCount]);
+  }, []);
 
   const handleConfigChange = useCallback(async (newConfig) => {
     try {
@@ -77,20 +76,25 @@ function App() {
     if (!window.lolAPI) return;
     const cleanupStatus = window.lolAPI.onStatusUpdate((newStatus) => {
       setStatus((prev) => ({ ...prev, ...newStatus }));
-      if (newStatus.deathCount !== undefined) {
-        setDeathCount(newStatus.deathCount);
-      }
     });
     return cleanupStatus;
   }, []);
 
-  // 监听阵亡事件
+  // 加载持久化统计
   useEffect(() => {
     if (!window.lolAPI) return;
-    const cleanupDeath = window.lolAPI.onDeathEvent((event) => {
-      setDeathCount(event.deathCount);
+    window.lolAPI.getStats()
+      .then(setStats)
+      .catch((err) => console.error('加载统计失败:', err));
+  }, []);
+
+  // 监听统计更新（主进程主动推送）
+  useEffect(() => {
+    if (!window.lolAPI) return;
+    const cleanupStats = window.lolAPI.onStatsUpdate((newStats) => {
+      setStats(newStats);
     });
-    return cleanupDeath;
+    return cleanupStats;
   }, []);
 
   // 初始加载配置
@@ -105,7 +109,7 @@ function App() {
     <ThemeProvider theme={voidRiftTheme}>
       <CssBaseline />
 
-      {/* 全屏容器: 不滚动, 纵向flex布局 */}
+      {/* 全屏容器 */}
       <Box
         className="void-bg"
         sx={{
@@ -118,7 +122,7 @@ function App() {
           userSelect: 'none',
         }}
       >
-        {/* ---- 顶部状态栏 ---- */}
+        {/* ---- 顶部栏：品牌 + 横向状态 ---- */}
         <Box
           sx={{
             flexShrink: 0,
@@ -126,89 +130,38 @@ function App() {
             py: 1.5,
             display: 'flex',
             alignItems: 'center',
-            justifyContent: 'space-between',
+            gap: 2,
             borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
           }}
         >
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-            {/* 品牌 */}
-            <Box
-              sx={{
-                fontSize: '0.8rem',
-                fontWeight: 700,
-                letterSpacing: '0.08em',
-                color: '#C89B3C',
-                textTransform: 'uppercase',
-              }}
-            >
-              Void Rift
-            </Box>
-            {/* 分隔 */}
-            <Box sx={{ width: 1, height: 16, bgcolor: 'rgba(255,255,255,0.08)' }} />
-            {/* 状态指示 */}
-            <StatusPanel
-              status={status}
-              isMonitoring={isMonitoring}
-              onStart={handleStart}
-              onStop={handleStop}
-              compact
-            />
-          </Box>
-
-          {/* 阵亡次数摘要 */}
+          {/* 品牌 */}
           <Box
             sx={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 1,
+              fontSize: '0.85rem',
+              fontWeight: 700,
+              letterSpacing: '0.04em',
+              color: '#C89B3C',
             }}
           >
-            <Box
-              sx={{
-                fontSize: '0.7rem',
-                fontWeight: 600,
-                letterSpacing: '0.06em',
-                textTransform: 'uppercase',
-                color: '#5B5855',
-              }}
-            >
-              Deaths
-            </Box>
-            <Box
-              key={deathCount}
-              className={status.isDead ? '' : 'count-bump'}
-              sx={{
-                fontSize: '1.3rem',
-                fontWeight: 700,
-                color: status.isDead ? '#E84057' : '#C89B3C',
-                fontVariantNumeric: 'tabular-nums',
-                minWidth: 32,
-                textAlign: 'right',
-                transition: 'color 400ms ease',
-              }}
-            >
-              {deathCount}
-            </Box>
+            今天摸鱼了吗
           </Box>
-        </Box>
 
-        {/* ---- 中部阵亡计数器 (flex:1 撑满) ---- */}
-        <Box
-          sx={{
-            flex: 1,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            minHeight: 0,
-          }}
-        >
-          <DeathCounter
-            deathCount={deathCount}
-            isDead={status.isDead}
-            statusState={status.state}
-            message={status.message}
+          {/* 分隔 */}
+          <Box sx={{ width: 1, height: 16, bgcolor: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
+
+          {/* 横向状态指示 */}
+          <StatusPanel
+            status={status}
+            isMonitoring={isMonitoring}
           />
         </Box>
+
+        {/* ---- 中部主区域：双卡片铺满 ---- */}
+        <StatsPanel
+          totalDeaths={stats.totalDeaths}
+          totalAfkMs={stats.totalAfkMs}
+          isDead={status.isDead}
+        />
 
         {/* ---- 底部操作栏 ---- */}
         <Box
@@ -265,7 +218,7 @@ function App() {
               },
             }}
           >
-            {/* 图标 */}
+            {/* 状态点 */}
             <Box
               component="span"
               sx={{
