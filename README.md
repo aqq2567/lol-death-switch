@@ -44,7 +44,7 @@
 ### 安装
 
 ```bash
-git clone https://github.com/你的用户名/lol-death-switch.git
+git clone https://github.com/aqq2567/lol-death-switch.git
 cd lol-death-switch
 npm install
 ```
