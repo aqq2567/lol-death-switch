@@ -17,6 +17,49 @@ let config = {
   delaySeconds: 0,
 };
 
+// ========== 本地日志文件 ==========
+
+/** @type {string|null} 当前会话的日志文件路径 */
+let logFilePath = null;
+
+/**
+ * 初始化日志文件
+ * 路径: %APPDATA%/lol-death-switch/logs/YYYY-MM-DD_HH-MM-SS.log
+ */
+function initLogger() {
+  const logDir = path.join(app.getPath('userData'), 'logs');
+  if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+
+  const now = new Date();
+  const ts = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}-${String(now.getMinutes()).padStart(2,'0')}-${String(now.getSeconds()).padStart(2,'0')}`;
+  logFilePath = path.join(logDir, `${ts}.log`);
+
+  fs.writeFileSync(logFilePath, `=== LoL Death Switch 日志开始 === ${now.toISOString()}\n`);
+  console.log('[Logger] 日志文件:', logFilePath);
+}
+
+/**
+ * 写日志（同时输出到控制台和文件）
+ * @param {string} level - DEBUG / INFO / WARN / ERROR
+ * @param {string} message
+ */
+function log(level, message) {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] [${level}] ${message}`;
+
+  // 控制台输出
+  switch (level) {
+    case 'ERROR': console.error(line); break;
+    case 'WARN':  console.warn(line);  break;
+    default:      console.log(line);
+  }
+
+  // 文件输出
+  if (logFilePath) {
+    try { fs.appendFileSync(logFilePath, line + '\n'); } catch {}
+  }
+}
+
 // ========== 持久化统计 ==========
 
 /** @type {{ totalDeaths: number, totalAfkMs: number }} */
@@ -223,14 +266,14 @@ function saveGameWindow() {
   try {
     // ★ 诊断日志：当前前台窗口是什么？
     const diag = runPS(LOL_SAVE_RESTORE_PS + ' [LolRecover]::DiagFg()');
-    console.log('[saveGameWindow] 当前前台窗口:', diag);
+    log('INFO', '[saveGameWindow] 当前前台窗口: ' + diag);
 
     // ★ 主策略：按进程名查找对局客户端
     const gameHwnd = runPS(LOL_SAVE_RESTORE_PS + ' [LolRecover]::FindGame()');
     if (gameHwnd && gameHwnd !== '0') {
       savedGameHwnd = gameHwnd;
       const gameDiag = runPS(LOL_SAVE_RESTORE_PS + ` [LolRecover]::Diag(${gameHwnd})`);
-      console.log('[saveGameWindow] ✓ 通过进程名找到对局窗口:', gameDiag);
+      log('INFO', '[saveGameWindow] ✓ 通过进程名找到对局窗口: ' + gameDiag);
       return;
     }
 
@@ -238,14 +281,14 @@ function saveGameWindow() {
     const fgHwnd = runPS(LOL_SAVE_RESTORE_PS + ' [LolRecover]::SaveFg()');
     if (fgHwnd && fgHwnd !== '0') {
       savedGameHwnd = fgHwnd;
-      console.log('[saveGameWindow] ⚠ 未找到对局进程，回退到前台窗口: hwnd=' + fgHwnd);
+      log('WARN', '[saveGameWindow] ⚠ 未找到对局进程，回退到前台窗口: hwnd=' + fgHwnd);
       return;
     }
 
-    console.log('[saveGameWindow] ✗ 无法获取任何窗口句柄');
+    log('WARN', '[saveGameWindow] ✗ 无法获取任何窗口句柄');
     savedGameHwnd = null;
   } catch (err) {
-    console.error('[saveGameWindow] 异常:', err.message);
+    log('ERROR', '[saveGameWindow] 异常: ' + err.message);
     savedGameHwnd = null;
   }
 }
@@ -256,7 +299,7 @@ function saveGameWindow() {
  */
 function restoreGameWindow() {
   if (!savedGameHwnd) {
-    console.log('[restoreGameWindow] 无保存句柄，最小化本窗口');
+    log('INFO', '[restoreGameWindow] 无保存句柄，最小化本窗口');
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized()) {
       mainWindow.minimize();
     }
@@ -264,17 +307,17 @@ function restoreGameWindow() {
   }
 
   const hwnd = savedGameHwnd;
-  console.log('[restoreGameWindow] 即将切回窗口:', hwnd);
+  log('INFO', '[restoreGameWindow] 即将切回窗口: ' + hwnd);
 
   runPSAsync(LOL_SAVE_RESTORE_PS + ` [LolRecover]::Restore(${hwnd})`, (err) => {
     if (err) {
-      console.error('[restoreGameWindow] 切回失败:', err.message);
+      log('ERROR', '[restoreGameWindow] 切回失败: ' + err.message);
       // 兜底：最小化本窗口
       if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized()) {
         mainWindow.minimize();
       }
     } else {
-      console.log('[restoreGameWindow] ✓ 已切回窗口:', hwnd);
+      log('INFO', '[restoreGameWindow] ✓ 已切回窗口: ' + hwnd);
     }
   });
 
@@ -291,7 +334,7 @@ function setupIPC() {
     if (lolMonitor) {
       lolMonitor.stop();
     }
-    lolMonitor = new LoLMonitor(config.pollInterval);
+    lolMonitor = new LoLMonitor(config.pollInterval, log);
     lolMonitor.start();
 
     // 监听状态更新事件
@@ -414,6 +457,7 @@ function setupIPC() {
 
 // Electron应用生命周期
 app.whenReady().then(() => {
+  initLogger();
   loadStats();
   setupIPC();
   createWindow();

@@ -16,8 +16,9 @@ class LoLMonitor extends EventEmitter {
 
   /**
    * @param {number} pollInterval - 轮询间隔（毫秒），默认3000
+   * @param {Function} [logger] - 可选日志函数 (level, message) => void
    */
-  constructor(pollInterval = 3000) {
+  constructor(pollInterval = 3000, logger = null) {
     super();
     this.pollInterval = pollInterval;
     this.timer = null;
@@ -33,6 +34,14 @@ class LoLMonitor extends EventEmitter {
     // 连续失败计数（用于判断游戏是否在运行）
     this.failureCount = 0;
     this.maxFailures = 3;
+
+    // 日志函数（有则用，无则用 console）
+    this._log = logger || ((level, msg) => {
+      switch (level) {
+        case 'ERROR': console.error(`[${new Date().toISOString()}] [ERROR] ${msg}`); break;
+        default: console.log(`[${new Date().toISOString()}] [INFO] ${msg}`);
+      }
+    });
   }
 
   /**
@@ -102,7 +111,7 @@ class LoLMonitor extends EventEmitter {
       // 提取当前活跃玩家名称
       if (data && data.activePlayer && data.activePlayer.summonerName) {
         if (this.activePlayerName !== data.activePlayer.summonerName) {
-          console.log('[LoLMonitor] 玩家:', data.activePlayer.summonerName);
+          this._log('INFO', '[LoLMonitor] 玩家: ' + data.activePlayer.summonerName);
           this.activePlayerName = data.activePlayer.summonerName;
         }
       }
@@ -114,7 +123,7 @@ class LoLMonitor extends EventEmitter {
         // 新阵亡事件触发
         this.wasDead = true;
         this.deathCount += 1;
-        console.log(`[LoLMonitor] 💀 阵亡检测 #${this.deathCount} | health=${this._getHealth(data)} isDead=${isDead}`);
+        this._log('INFO', `[LoLMonitor] 💀 阵亡检测 #${this.deathCount} | health=${this._getHealth(data)} isDead=${isDead}`);
 
         this.emit('status-update', {
           state: 'dead',
@@ -135,7 +144,7 @@ class LoLMonitor extends EventEmitter {
       } else if (!isDead && this.wasDead) {
         // 复活！重置阵亡状态，触发切回事件
         this.wasDead = false;
-        console.log(`[LoLMonitor] ✨ 复活检测 | health=${this._getHealth(data)}`);
+        this._log('INFO', `[LoLMonitor] ✨ 复活检测 | health=${this._getHealth(data)}`);
 
         this.emit('status-update', {
           state: 'alive',
@@ -157,7 +166,7 @@ class LoLMonitor extends EventEmitter {
       }
     } catch (error) {
       this.failureCount += 1;
-      console.log(`[LoLMonitor] API轮询失败 (${this.failureCount}/${this.maxFailures}): ${error.message}`);
+      this._log('WARN', `[LoLMonitor] API轮询失败 (${this.failureCount}/${this.maxFailures}): ${error.message}`);
 
       // 连续多次失败，认为游戏客户端不在运行
       if (this.failureCount >= this.maxFailures) {
